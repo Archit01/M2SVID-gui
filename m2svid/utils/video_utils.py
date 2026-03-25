@@ -42,14 +42,13 @@ def read_frames_in_batches_decord(vr, batch_size, start_frame=0):
         current_frame = end_frame
 
 
-def open_ffmpeg_process(output_path, width, height, fps, grayscale=False, no_compression=False, crf=16):
+def open_ffmpeg_process(output_path, width, height, fps, grayscale=False, no_compression=False, crf=16, bit_depth=8):
     if grayscale:
         input_pix_fmt = 'gray'
         output_pix_fmt = 'gray'
     else:
         input_pix_fmt = 'rgb24'
-        output_pix_fmt = 'yuv420p'
-
+        output_pix_fmt = 'yuv420p10le' if bit_depth == 10 else 'yuv420p'
 
     if no_compression:
         ffmpeg_process = (

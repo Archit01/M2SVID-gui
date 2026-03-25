@@ -1,2 +1,14 @@
 __pycache__/
-.vscode
+.vscode/
+
+# Project Specific Excludes
+python_embed/
+ckpts/
+outputs/
+input/
+demo/output/
+*.mp4
+*.zip
+*.pt
+*.npz
+*.mergesettings.json

@@ -29,46 +29,135 @@ import cv2
 def process_video_with_depth(
     video_path,
     depth_path,
-    output_path_reprojected,
-    output_path_mask,
+    output_path,
     disparity_scale=None,
     disparity_perc=None,
     batch_size=10,
+    global_normalize=False,
+    start_frame=0,
+    max_frames=None,
+    crf=14,
+    bit_depth=10,
 ):
-    relative_depth_data = np.load(depth_path)
-    relative_depth = relative_depth_data['depth']
+    # Probe input video
     probe = ffmpeg.probe(video_path)
     video_stream = next(s for s in probe['streams'] if s['codec_type'] == 'video')
     width = int(video_stream['width'])
     height = int(video_stream['height'])
-
-    if disparity_perc is not None:
-        disparity_scale = int(width * disparity_perc)
-
     fps = get_video_fps(video_path, probe)
 
-    ffmpeg_process_reprojected = None
-    ffmpeg_process_mask = None
+    total_video_frames = None
+    if 'nb_frames' in video_stream:
+        total_video_frames = int(video_stream['nb_frames'])
 
-    for i, left_frames in enumerate(
-        tqdm.tqdm(
-            read_frames_in_batches_ffmpeg(video_path, batch_size, width, height),
-            total=int(relative_depth.shape[0] // batch_size),
-        )
-    ):
-        depth_batch = relative_depth[i * batch_size : (i + 1) * batch_size]
-        depth_batch = np.array([
-            cv2.resize(depth_frame, (width, height), interpolation=cv2.INTER_CUBIC)
-            for depth_frame in depth_batch
+    # Validate Depth Path type (video or numpy)
+    is_depth_video = depth_path.lower().endswith(('.mp4', '.avi', '.mov', '.mkv'))
+
+    min_depth = None
+    max_depth = None
+    relative_depth = None
+    depth_w = None
+    depth_h = None
+    total_depth_frames = 0
+
+    print("Analyzing depth map for global min/max estimation...")
+    if is_depth_video:
+        depth_probe = ffmpeg.probe(depth_path)
+        depth_stream = next(s for s in depth_probe['streams'] if s['codec_type'] == 'video')
+        depth_w = int(depth_stream['width'])
+        depth_h = int(depth_stream['height'])
+        if 'nb_frames' in depth_stream:
+            total_depth_frames = int(depth_stream['nb_frames'])
+        else:
+            total_depth_frames = total_video_frames if total_video_frames else 999999
+
+        if global_normalize:
+            # First pass: read all depth frames to find global min & max
+            current_min = float('inf')
+            current_max = float('-inf')
+            for depth_frames in tqdm.tqdm(
+                read_frames_in_batches_ffmpeg(depth_path, batch_size, depth_w, depth_h, start_sec=0),
+                desc="Finding global min/max depth"
+            ):
+                # Using the red channel (assuming identical RGB for grayscale depth)
+                d_batch = depth_frames[..., 0].astype(np.float32)
+                current_min = min(current_min, d_batch.min())
+                current_max = max(current_max, d_batch.max())
+            min_depth, max_depth = current_min, current_max
+            print(f"Global depth min: {min_depth}, max: {max_depth}")
+    else:
+        # Load NumPy array
+        relative_depth_data = np.load(depth_path)
+        relative_depth = relative_depth_data['depth'] if 'depth' in relative_depth_data else relative_depth_data
+        total_depth_frames = relative_depth.shape[0]
+        depth_h, depth_w = relative_depth.shape[1], relative_depth.shape[2]
+        if global_normalize:
+            min_depth, max_depth = relative_depth.min(), relative_depth.max()
+            print(f"Global depth min: {min_depth}, max: {max_depth}")
+
+
+    # Limit frames if max_frames is provided
+    end_frame = start_frame + max_frames if max_frames is not None else total_depth_frames
+    frames_to_process = min(end_frame - start_frame, total_depth_frames - start_frame)
+    start_sec = start_frame / fps if fps else 0.0
+
+    print(f"Processing frames {start_frame} to {start_frame + frames_to_process}...")
+
+    if disparity_perc is not None:
+        current_disparity_scale = int(width * disparity_perc)
+    else:
+        current_disparity_scale = disparity_scale
+
+    ffmpeg_process_grid = None
+
+    video_frame_generator = read_frames_in_batches_ffmpeg(video_path, batch_size, width, height, start_sec=start_sec)
+    
+    if is_depth_video:
+        depth_frame_generator = read_frames_in_batches_ffmpeg(depth_path, batch_size, depth_w, depth_h, start_sec=start_sec)
+    
+    frames_processed = 0
+
+    for i in tqdm.tqdm(range(0, frames_to_process, batch_size), desc="Warping implementation"):
+        try:
+            left_frames = next(video_frame_generator)
+            if is_depth_video:
+                depth_frames_rgb = next(depth_frame_generator)
+                depth_batch = depth_frames_rgb[..., 0].astype(np.float32) # take red channel
+            else:
+                depth_batch = relative_depth[start_frame + frames_processed : start_frame + frames_processed + len(left_frames)]
+                depth_batch = depth_batch.astype(np.float32)
+        except StopIteration:
+            break
+
+        # Ensure same size limits
+        current_batch_size = min(len(left_frames), len(depth_batch))
+        if current_batch_size == 0:
+            break
+            
+        left_frames = left_frames[:current_batch_size]
+        depth_batch = depth_batch[:current_batch_size]
+        
+        # Apply Global Normalization if required
+        if global_normalize and min_depth is not None and max_depth is not None:
+            if max_depth > min_depth:
+                depth_batch = (depth_batch - min_depth) / (max_depth - min_depth)
+        elif is_depth_video:
+            # Fallback to map 0-255 MP4 data into 0-1 range to match .npz scales
+            depth_batch = depth_batch / 255.0
+
+        # Space alignment & Scaling
+        depth_batch_resized = np.array([
+            cv2.resize(d_frame, (width, height), interpolation=cv2.INTER_CUBIC)
+            for d_frame in depth_batch
         ])
 
-        disparities = depth_batch * disparity_scale
+        disparities = depth_batch_resized * current_disparity_scale
 
         reprojected_right_videos = []
         reprojected_right_masks = []
 
         for left_frame, disparity in zip(left_frames, disparities):
-            reprojected_image, inpainting_mask, reprojected_depth = scatter_image(
+            reprojected_image, inpainting_mask, _ = scatter_image(
                 left_frame, disparity, direction=-1, scale_factor=1, reproject_depth=True
             )
             reprojected_right_videos.append(reprojected_image)
@@ -77,50 +166,62 @@ def process_video_with_depth(
         reprojected_right_videos = np.stack(reprojected_right_videos, axis=0)
         reprojected_right_masks = np.stack(reprojected_right_masks, axis=0)
 
-        if ffmpeg_process_reprojected is None:
-            _, height, width, _ = reprojected_right_videos.shape
-            ffmpeg_process_reprojected = open_ffmpeg_process(
-                output_path_reprojected, width, height, fps
-            )
-            ffmpeg_process_mask = open_ffmpeg_process(
-                output_path_mask, width, height, fps, grayscale=True, no_compression=True
+        # Initialize writers natively supporting custom encoding 
+        if ffmpeg_process_grid is None:
+            ffmpeg_process_grid = open_ffmpeg_process(
+                output_path, width * 2, height, fps, crf=crf, bit_depth=bit_depth
             )
 
         for reprojected_frame, mask_frame in zip(
             reprojected_right_videos, reprojected_right_masks
         ):
-            ffmpeg_process_reprojected.stdin.write(reprojected_frame.tobytes())
-            ffmpeg_process_mask.stdin.write(mask_frame.tobytes())
+            if len(mask_frame.shape) == 2:
+                mask_rgb = np.stack((mask_frame,)*3, axis=-1)
+            elif mask_frame.shape[-1] == 1:
+                mask_rgb = np.concatenate((mask_frame,)*3, axis=-1)
+            else:
+                mask_rgb = mask_frame
+            grid_frame = np.concatenate((mask_rgb, reprojected_frame), axis=1)
+            ffmpeg_process_grid.stdin.write(grid_frame.tobytes())
+            
+        frames_processed += current_batch_size
 
-    ffmpeg_process_reprojected.stdin.close()
-    ffmpeg_process_reprojected.wait()
-    ffmpeg_process_mask.stdin.close()
-    ffmpeg_process_mask.wait()
-
+    if ffmpeg_process_grid:
+        ffmpeg_process_grid.stdin.close()
+        ffmpeg_process_grid.wait()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process video frames with depth data to generate reprojected videos and masks.")
     parser.add_argument("--video_path", type=str, required=True, help="Path to the input video file.")
-    parser.add_argument("--depth_path", type=str, required=True, help="Path to the depth numpy file.")
-    parser.add_argument("--output_path_reprojected", type=str, required=True, help="Path to save the reprojected output video.")
-    parser.add_argument("--output_path_mask", type=str, required=True, help="Path to save the mask output video.")
-    parser.add_argument("--disparity_scale", type=float, default=None, help="List of disparity scales to apply.")
-    parser.add_argument("--disparity_perc", type=float, default=None, help="List of disparity scales to apply.")
+    parser.add_argument("--depth_path", type=str, required=True, help="Path to the depth file (.npz, .npy, or .mp4/video).")
+    parser.add_argument("--output_path", type=str, required=True, help="Path to save the output grid video.")
+    parser.add_argument("--disparity_scale", type=float, default=None, help="Absolute disparity scale to apply.")
+    parser.add_argument("--disparity_perc", type=float, default=None, help="Percentage based disparity scale to apply.")
+    parser.add_argument("--start_frame", type=int, default=0, help="Start frame for chunk processing.")
+    parser.add_argument("--max_frames", type=int, default=None, help="Maximum number of frames to process in this chunk.")
+    parser.add_argument("--global_normalize", action="store_true", help="Apply strict global normalization for the entire depth video/map across all frames.")
+    parser.add_argument("--crf", type=int, default=14, help="CRF value for the H264 10-bit output.")
+    parser.add_argument("--bit_depth", type=int, default=10, help="Bit depth for the H264 output.")
+    parser.add_argument("--batch_size", type=int, default=10, help="Processing sliding window / chunk size in frames.")
 
     args = parser.parse_args()
 
     assert (args.disparity_scale is None) or (args.disparity_perc is None)
     assert (args.disparity_scale is not None) or (args.disparity_perc is not None)
 
-    os.makedirs(os.path.dirname(args.output_path_reprojected), exist_ok=True)
-    os.makedirs(os.path.dirname(args.output_path_mask), exist_ok=True)
+    os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
 
     process_video_with_depth(
         args.video_path,
         args.depth_path,
-        args.output_path_reprojected,
-        args.output_path_mask,
+        args.output_path,
         disparity_scale=args.disparity_scale,
         disparity_perc=args.disparity_perc,
+        batch_size=args.batch_size,
+        global_normalize=args.global_normalize,
+        start_frame=args.start_frame,
+        max_frames=args.max_frames,
+        crf=args.crf,
+        bit_depth=args.bit_depth,
     )

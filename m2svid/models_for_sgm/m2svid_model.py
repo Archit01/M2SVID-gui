@@ -263,6 +263,7 @@ class VideoLDM(DiffusionEngine):
         do_not_decode = False,
         **kwargs,
     ) -> Dict:
+        device = torch.device('cuda')
         conditioner_input_keys = [e.input_key for e in self.conditioner.embedders]
         if ucg_keys:
             assert all(map(lambda x: x in conditioner_input_keys, ucg_keys)), (
@@ -280,13 +281,20 @@ class VideoLDM(DiffusionEngine):
         frames = self.get_input(batch)
         N = len(frames)
 
+        # CPU offload: move conditioner to GPU
+        self.conditioner.to(device)
+
         c, uc = self.conditioner.get_unconditional_conditioning(
             batch,
             force_uc_zero_embeddings=ucg_keys if len(self.conditioner.embedders) > 0 else [],
         )
 
+        # CPU offload: move conditioner back to CPU
+        self.conditioner.to('cpu')
+        torch.cuda.empty_cache()
+
         x = rearrange(frames, 'b c t h w -> (b t) c h w')
-        x = x.to(self.device)
+        x = x.to(device)
 
         # if not do_not_decode:
         #     z = self.encode_first_stage(x.half())
@@ -296,7 +304,7 @@ class VideoLDM(DiffusionEngine):
         #     x_rec = None
 
         additional_model_inputs = {}
-        additional_model_inputs["image_only_indicator"] = torch.zeros(N * 2, batch["num_video_frames"]).to(self.device)
+        additional_model_inputs["image_only_indicator"] = torch.zeros(N * 2, batch["num_video_frames"]).to(device)
         additional_model_inputs["num_video_frames"] = batch["num_video_frames"]
 
         if self.cond_reprojected_video:
@@ -307,14 +315,26 @@ class VideoLDM(DiffusionEngine):
         def denoiser(input, sigma, c):
             return self.denoiser(self.model, input, sigma, c, **additional_model_inputs)
 
+        # CPU offload: move model to GPU
+        if hasattr(self, 'model'): self.model.to(device)
+
         with self.ema_scope("Plotting"):
             with torch.autocast(device_type='cuda', dtype=torch.float16):
                 shape = (x.shape[0], 4, int(x.shape[2] // 8), int(x.shape[3] // 8))
-                randn = torch.randn(shape, device=self.device)
+                randn = torch.randn(shape, device=device)
                 samples = self.sampler(denoiser, randn, cond=c, uc=uc, num_video_frames=batch["num_video_frames"])
 
+        # CPU offload: move model back to CPU
+        if hasattr(self, 'model'): self.model.to('cpu')
+        torch.cuda.empty_cache()
+
         if not do_not_decode:
+            # CPU offload: move first stage to GPU
+            if hasattr(self, 'first_stage_model'): self.first_stage_model.to(device)
             samples = self.decode_first_stage(samples.half(), num_video_frames=batch["num_video_frames"])
+            # CPU offload: move first stage back to CPU
+            if hasattr(self, 'first_stage_model'): self.first_stage_model.to('cpu')
+            torch.cuda.empty_cache()
             samples = einops.rearrange(samples, '(b t) c h w -> b c t h w', t=batch["num_video_frames"])
 
         output = {
