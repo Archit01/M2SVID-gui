@@ -197,7 +197,7 @@ def process_warping(
 
 def process_inpainting(
     left_eye_folder, grid_folder, output_folder,
-    mask_antialias, tile_size, tile_overlap, temp_size, temp_overlap,
+    mask_antialias, tile_size, tile_overlap, chunk_size, overlap, original_input_blend_strength,
     model_variant
 ):
     if not left_eye_folder or not os.path.isdir(left_eye_folder):
@@ -261,8 +261,9 @@ def process_inpainting(
             "--mask_antialias", str(mask_antialias),
             "--spatial_tile_size", str(tile_size),
             "--spatial_tile_overlap", str(tile_overlap),
-            "--temporal_tile_size", str(temp_size),
-            "--temporal_tile_overlap", str(temp_overlap),
+            "--chunk_size", str(chunk_size),
+            "--overlap", str(overlap),
+            "--original_input_blend_strength", str(original_input_blend_strength),
             "--model_config", model_config,
             "--ckpt", ckpt
         ]
@@ -468,8 +469,9 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                     i_mask_antialias = gr.Number(label="Mask Antialias", value=0, precision=0)
                     i_tile_size = gr.Number(label="Spatial Tile Size", value=256, precision=0)
                     i_tile_overlap = gr.Number(label="Spatial Tile Overlap", value=32, precision=0)
-                    i_temp_size = gr.Number(label="Temporal Tile Size", value=23, precision=0)
-                    i_temp_overlap = gr.Number(label="Temporal Tile Overlap", value=3, precision=0)
+                    i_chunk_size = gr.Number(label="Chunk Size (frames per pass, max 25)", value=25, precision=0)
+                    i_overlap = gr.Number(label="Overlap (Temporal Crossfade)", value=3, precision=0)
+                    i_original_input_blend_strength = gr.Number(label="Original Input Blend Strength (Context)", value=0.0, step=0.1)
                     
             with gr.Row():
                 i_file_prog = gr.Slider(minimum=0, maximum=100, step=1, label="Overall File Progress (%)", interactive=False)
@@ -488,7 +490,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                 fn=process_inpainting,
                 inputs=[
                     i_lefteye_folder, i_grid_folder, i_output_folder,
-                    i_mask_antialias, i_tile_size, i_tile_overlap, i_temp_size, i_temp_overlap,
+                    i_mask_antialias, i_tile_size, i_tile_overlap, i_chunk_size, i_overlap, i_original_input_blend_strength,
                     i_model_variant
                 ],
                 outputs=[i_file_prog, i_temp_prog, i_spat_prog, i_prog_text, i_output]
