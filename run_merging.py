@@ -21,10 +21,8 @@ from core.common.gpu_utils import release_cuda_memory
 from core.common.sidecar_manager import SidecarConfigManager, find_video_by_core_name, find_sidecar_file, read_clip_sidecar
 from core.common.image_processing import (
     apply_mask_dilation, apply_gaussian_blur, apply_shadow_blur,
-    apply_color_transfer, apply_borders_to_frames,
-    apply_dubois_anaglyph_torch, apply_optimized_anaglyph_torch
+    apply_color_transfer,    apply_dubois_anaglyph_torch, apply_optimized_anaglyph_torch
 )
-from core.common.file_organizer import move_files_to_finished
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -57,18 +55,7 @@ def run_batch_process(settings, single_video_path=None):
         logger.info("No .mp4 files found in the inpainted video folder.")
         return
 
-    resume_enabled = settings.get("resume", False)
-    if resume_enabled:
-        finished_dir = os.path.join(settings["inpainted_folder"], "finished")
-        if os.path.isdir(finished_dir):
-            finished_files = set(os.listdir(finished_dir))
-            original_count = len(inpainted_videos)
-            inpainted_videos = [v for v in inpainted_videos if os.path.basename(v) not in finished_files]
-            skipped_count = original_count - len(inpainted_videos)
-            if skipped_count > 0:
-                logger.info(f"Resume: Skipped {skipped_count} already processed files.")
-        else:
-            logger.info("Resume: No 'finished' folder found. Processing all files.")
+    inpainted_videos = sorted(glob.glob(os.path.join(settings["inpainted_folder"], "*.mp4")))
 
     if not inpainted_videos:
         logger.info("All videos have already been processed (Resume mode).")
@@ -95,7 +82,6 @@ def run_batch_process(settings, single_video_path=None):
         print(f"Processing File {i + 1}/{total_videos}: {base_name}", flush=True)
 
         inpainted_reader, splatted_reader, original_reader = None, None, None
-        original_video_path_to_move = None
         try:
             # Use active_settings for per-video overrideable params
             s = active_settings
@@ -127,8 +113,6 @@ def run_batch_process(settings, single_video_path=None):
             if not flip_horizontal and os.path.splitext(base_name)[0].endswith("F"):
                 flip_horizontal = True
 
-            left_border = clip_sidecar_data.get("left_border", 0.0)
-            right_border = clip_sidecar_data.get("right_border", 0.0)
 
             mask_folder = settings["mask_folder"]
             splatted4_pattern = os.path.join(mask_folder, f"{core_name}_*_splatted4*.mp4")
@@ -155,7 +139,6 @@ def run_batch_process(settings, single_video_path=None):
             original_reader = None
             if is_dual_input:
                 original_video_path = find_video_by_core_name(settings["original_folder"], core_name)
-                original_video_path_to_move = original_video_path
 
                 if original_video_path and os.path.exists(original_video_path):
                     original_reader = VideoReader(original_video_path, ctx=cpu(0))
@@ -186,11 +169,6 @@ def run_batch_process(settings, single_video_path=None):
             elif output_format == "Full SBS (Left-Right)":
                 output_width = hires_W * 2
                 output_suffix = "_merged_full_sbs.mp4"
-            elif output_format == "Double SBS":
-                output_width = hires_W * 2
-                output_height = hires_H * 2
-                output_suffix = "_merged_half_sbs.mp4"
-                perceived_width_for_filename = hires_W * 2
             elif output_format == "Half SBS (Left-Right)":
                 output_width = hires_W
                 output_suffix = "_merged_half_sbs.mp4"
@@ -210,7 +188,7 @@ def run_batch_process(settings, single_video_path=None):
                 final_output_mp4_path=output_path,
                 fps=fps,
                 video_stream_info=video_stream_info,
-                pad_to_16_9=s.get("pad_to_16_9", False),
+                pad_to_16_9=False,
                 output_format_str=output_format,
                 encoding_options={
                     "codec": s.get("codec", "Auto"),
@@ -248,8 +226,14 @@ def run_batch_process(settings, single_video_path=None):
                     if not frame_indices:
                         break
 
-                    inpainted_np = inpainted_reader.get_batch(frame_indices).asnumpy()
-                    splatted_np = splatted_reader.get_batch(frame_indices).asnumpy()
+                    inpainted_indices = frame_indices
+                    splatted_indices = frame_indices
+                    if s.get("undo_reverse", False):
+                        inpainted_indices = [num_frames - 1 - idx for idx in frame_indices]
+                        splatted_indices = [num_frames - 1 - idx for idx in frame_indices]
+
+                    inpainted_np = inpainted_reader.get_batch(inpainted_indices).asnumpy()
+                    splatted_np = splatted_reader.get_batch(splatted_indices).asnumpy()
 
                     inpainted_tensor_full = torch.from_numpy(inpainted_np).permute(0, 3, 1, 2).float() / 255.0
                     splatted_tensor = torch.from_numpy(splatted_np).permute(0, 3, 1, 2).float() / 255.0
@@ -378,10 +362,6 @@ def run_batch_process(settings, single_video_path=None):
                             shifted[:, :, :, :-c] = blended_right_eye[:, :, :, c:]
                         blended_right_eye = shifted
 
-                    if s.get("add_borders", True) and (left_border > 0 or right_border > 0):
-                        original_left, blended_right_eye = apply_borders_to_frames(
-                            left_border, right_border, original_left, blended_right_eye
-                        )
 
                     if output_format == "Full SBS (Left-Right)":
                         final_chunk = torch.cat([original_left, blended_right_eye], dim=3)
@@ -395,11 +375,6 @@ def run_batch_process(settings, single_video_path=None):
                             blended_right_eye, size=(hires_H, hires_W // 2), mode="bilinear", align_corners=False
                         )
                         final_chunk = torch.cat([resized_left, resized_right], dim=3)
-                    elif output_format == "Double SBS":
-                        sbs_chunk = torch.cat([original_left, blended_right_eye], dim=3)
-                        final_chunk = F.interpolate(
-                            sbs_chunk, size=(hires_H * 2, hires_W * 2), mode="bilinear", align_corners=False
-                        )
                     elif output_format == "Anaglyph (Red/Cyan)":
                         final_chunk = torch.cat(
                             [
@@ -479,32 +454,6 @@ def run_batch_process(settings, single_video_path=None):
                 inpainted_reader, splatted_reader, original_reader = (None, None, None)
                 time.sleep(0.1)
 
-                if settings.get("resume", False):
-                    cleanup_files = [
-                        (inpainted_video_path, settings["inpainted_folder"]),
-                        (splatted_file_path, settings["mask_folder"]),
-                    ]
-                    if original_video_path_to_move:
-                        cleanup_files.append((original_video_path_to_move, settings["original_folder"]))
-                        original_base = os.path.splitext(original_video_path_to_move)[0]
-                        for ext in [".fssidecar", ".json"]:
-                            sidecar_path = original_base + ext
-                            if os.path.exists(sidecar_path):
-                                cleanup_files.append((sidecar_path, settings["original_folder"]))
-
-                    inpainted_base = os.path.splitext(inpainted_video_path)[0]
-                    for ext in [".fssidecar", ".json"]:
-                        sidecar_path = inpainted_base + ext
-                        if os.path.exists(sidecar_path):
-                            cleanup_files.append((sidecar_path, settings["inpainted_folder"]))
-
-                    for src_path, dest_folder in cleanup_files:
-                        try:
-                            finished_dir = os.path.join(dest_folder, "finished")
-                            os.makedirs(finished_dir, exist_ok=True)
-                            shutil.move(src_path, os.path.join(finished_dir, os.path.basename(src_path)))
-                        except Exception as move_err:
-                            logger.warning(f"Could not move {os.path.basename(src_path)}: {move_err}")
 
         except Exception as e:
             if splatted_reader:

@@ -78,9 +78,31 @@ def run_subprocess_with_progress(cmd, env, progress_desc="Processing"):
         error_msg = "\n".join(full_log[-20:]) # Get last 20 lines of log
         raise Exception(f"Command failed with code {process.returncode}:\n{error_msg}")
 
+def reverse_video(path):
+    """Reverses a video file using FFmpeg's reverse filter."""
+    if not os.path.exists(path):
+        return
+    temp_path = path.replace(".mp4", "_rev_temp.mp4")
+    # Using simple reverse filter; audio is ignored as M2SVID outputs usually don't have it.
+    # Note: For very long videos, this might be memory intensive.
+    cmd = [
+        "ffmpeg", "-y", "-i", path, 
+        "-vf", "reverse", 
+        "-c:v", "libx264", "-crf", "14", "-preset", "slow", "-profile:v", "high10", "-pix_fmt", "yuv420p10le",
+        temp_path
+    ]
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if res.returncode == 0 and os.path.exists(temp_path):
+        os.replace(temp_path, path)
+    else:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise Exception(f"FFmpeg video reversal failed for {path}:\n{res.stderr.decode('utf-8')}")
+
 def process_warping(
     input_folder, depth_folder, left_eye_folder, high_res_folder, low_res_folder,
-    disparity_perc, high_batch, high_res, enable_low_res, low_batch, low_res
+    disparity_perc, high_batch, high_res, enable_low_res, low_batch, low_res,
+    reverse_output=False
 ):
     if not input_folder or not os.path.isdir(input_folder):
         yield 0, 0, "Input folder does not exist.", "Error"
@@ -188,10 +210,14 @@ def process_warping(
             for sub_perc, desc in run_subprocess_with_progress(cmd_warp_low, env_vars, f"Low Res Warping"):
                 yield file_perc, sub_perc, f"File {i+1}/{total_files} | {filename} - {desc}", "Running"
 
-        # 4. Move to Finish
-        finish_dir = os.path.join(input_folder, "finish")
-        os.makedirs(finish_dir, exist_ok=True)
-        shutil.move(video_path, os.path.join(finish_dir, filename))
+        # 4. Final Reversal (at the end of all steps for this video)
+        if reverse_output:
+            yield file_perc, 90, f"{filename} - Finalizing (Reversing Output Videos)", "Running"
+            reverse_video(left_eye_out)
+            reverse_video(high_res_out)
+            if enable_low_res:
+                reverse_video(low_res_out)
+
 
     yield 100, 100, "All files processed.", "Warping Section Processing Complete!"
 
@@ -287,20 +313,16 @@ def process_inpainting(
                 os.remove(out_path)
             os.rename(temp_out_path, out_path)
             
-        # Move to finish folder
-        finish_dir = os.path.join(left_eye_folder, "finish")
-        os.makedirs(finish_dir, exist_ok=True)
-        shutil.move(left_eye_path, os.path.join(finish_dir, filename))
         
     yield 100, 100, 100, "All files processed.", "Inpainting Section Processing Complete!"
 
 def process_merging(
     inpainted_folder, original_folder, mask_folder, output_folder,
-    use_gpu, pad_to_16_9, add_borders, resume, output_format, batch_chunk_size, enable_color_transfer,
+    use_gpu, output_format, batch_chunk_size, enable_color_transfer,
     codec, output_crf,
     mask_binarize_threshold, mask_dilate_kernel_size, mask_blur_kernel_size,
     shadow_shift, shadow_start_opacity, shadow_opacity_decay, shadow_min_opacity, shadow_decay_gamma,
-    convergence
+    convergence, undo_reverse=False
 ):
     if not inpainted_folder or not os.path.exists(inpainted_folder):
         yield 0, 0, "Error: Inpainted folder invalid or does not exist.", "Failed"
@@ -315,9 +337,10 @@ def process_merging(
         "mask_folder": mask_folder,
         "output_folder": output_folder,
         "use_gpu": use_gpu,
-        "pad_to_16_9": pad_to_16_9,
-        "add_borders": add_borders,
-        "resume": True,  # Always move to finished after processing
+        "undo_reverse": undo_reverse,
+        "pad_to_16_9": False,
+        "add_borders": False,
+        "resume": False,
         "output_format": output_format,
         "batch_chunk_size": int(batch_chunk_size),
         "enable_color_transfer": enable_color_transfer,
@@ -327,11 +350,11 @@ def process_merging(
         "mask_dilate_kernel_size": int(mask_dilate_kernel_size),
         "mask_blur_kernel_size": int(mask_blur_kernel_size),
         "shadow_shift": int(shadow_shift),
-        "shadow_start_opacity": float(shadow_start_opacity if shadow_start_opacity is not None else 0.7),
-        "shadow_opacity_decay": float(shadow_opacity_decay if shadow_opacity_decay is not None else 0.1),
-        "shadow_min_opacity": float(shadow_min_opacity if shadow_min_opacity is not None else 0.0),
+        "shadow_start_opacity": float(shadow_start_opacity if shadow_start_opacity is not None else 0.4),
+        "shadow_opacity_decay": float(shadow_opacity_decay if shadow_opacity_decay is not None else 0.4),
+        "shadow_min_opacity": float(shadow_min_opacity if shadow_min_opacity is not None else 0.4),
         "shadow_decay_gamma": float(shadow_decay_gamma if shadow_decay_gamma is not None else 1.0),
-        "convergence": int(convergence or 0),
+        "convergence": int(convergence or 35),
         "encoding_quality": "Medium",
         "encoding_tune": "None",
         "color_tags": "Auto",
@@ -421,6 +444,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                 with gr.Column(variant="panel"):
                     gr.Markdown("### Low Res Settings")
                     w_enable_low = gr.Checkbox(label="Enable Low Res Warping", value=True)
+                    w_reverse_out = gr.Checkbox(label="Reverse Output Videos", value=False)
                     w_low_batch = gr.Number(label="Low Res Batch Size", value=10, precision=0)
                     w_low_res = gr.Textbox(label="Low Res Output Resolution (W x H)", value="1280x704")
                     
@@ -442,7 +466,8 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                 fn=process_warping,
                 inputs=[
                     w_input_folder, w_depth_folder, w_lefteye_folder, w_hires_folder, w_lowres_folder,
-                    w_disparity, w_high_batch, w_high_res, w_enable_low, w_low_batch, w_low_res
+                    w_disparity, w_high_batch, w_high_res, w_enable_low, w_low_batch, w_low_res,
+                    w_reverse_out
                 ],
                 outputs=[w_file_prog, w_sub_prog, w_prog_text, w_output]
             )
@@ -523,36 +548,34 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                         label="Output Format",
                         choices=[
                             "Half SBS (Left-Right)", "Full SBS (Left-Right)", "Full SBS Cross-eye (Right-Left)",
-                            "Double SBS", "Anaglyph (Red/Cyan)", "Anaglyph Half-Color", "Right-Eye Only"
+                            "Anaglyph (Red/Cyan)", "Anaglyph Half-Color", "Right-Eye Only"
                         ],
-                        value="Half SBS (Left-Right)"
+                        value="Full SBS (Left-Right)"
                     )
                     with gr.Row():
                         m_use_gpu = gr.Checkbox(label="Use GPU", value=True)
-                        m_pad_to_16_9 = gr.Checkbox(label="Pad to 16:9", value=False)
-                        m_add_borders = gr.Checkbox(label="Apply Borders", value=True)
-                        m_resume = gr.Checkbox(label="Resume", value=False)
-                        m_color_transfer = gr.Checkbox(label="Color Transfer", value=False)
+                        m_color_transfer = gr.Checkbox(label="Color Transfer", value=True)
+                        m_undo_reverse = gr.Checkbox(label="Undo Reverse (for Blending)", value=False)
                         
                     with gr.Row():
-                        m_batch_chunk_size = gr.Number(label="GPU Frame Chunk Size", value=32, precision=0)
-                        m_convergence = gr.Slider(minimum=-100, maximum=100, step=1, label="Horizontal Convergence", value=0)
+                        m_batch_chunk_size = gr.Number(label="GPU Frame Chunk Size", value=10, precision=0)
+                        m_convergence = gr.Slider(minimum=-100, maximum=100, step=1, label="Horizontal Convergence", value=35)
                     with gr.Row():
                         m_codec = gr.Dropdown(label="FFmpeg Codec", choices=["Auto", "H.264", "H.265"], value="H.265")
-                        m_output_crf = gr.Number(label="Output CRF (Quality)", value=23, precision=0)
+                        m_output_crf = gr.Number(label="Output CRF (Quality)", value=14, precision=0)
             
             with gr.Row():
                 with gr.Column(variant="panel"):
                     gr.Markdown("### Mask Processing & Thresholding")
                     m_mask_bin_thresh = gr.Slider(minimum=-1.0, maximum=1.0, step=0.01, label="Mask Binarize Threshold (-1 = disabled)", value=-1.0)
-                    m_mask_dilate = gr.Slider(minimum=0, maximum=50, step=1, label="Mask Dilate Kernel", value=0)
-                    m_mask_blur = gr.Slider(minimum=0, maximum=50, step=1, label="Mask Blur Kernel", value=0)
+                    m_mask_dilate = gr.Slider(minimum=0, maximum=50, step=1, label="Mask Dilate Kernel", value=13)
+                    m_mask_blur = gr.Slider(minimum=0, maximum=50, step=1, label="Mask Blur Kernel", value=3)
                 with gr.Column(variant="panel"):
                     gr.Markdown("### Shadow / Edge Mitigation")
-                    m_shadow_shift = gr.Slider(minimum=0, maximum=100, step=1, label="Shadow Shift Amount", value=0)
-                    m_shadow_start_op = gr.Slider(minimum=0.0, maximum=1.0, step=0.01, label="Shadow Start Opacity", value=0.7)
-                    m_shadow_decay = gr.Slider(minimum=0.0, maximum=1.0, step=0.01, label="Shadow Opacity Decay", value=0.1)
-                    m_shadow_min_op = gr.Slider(minimum=0.0, maximum=1.0, step=0.01, label="Shadow Min Opacity", value=0.0)
+                    m_shadow_shift = gr.Slider(minimum=0, maximum=100, step=1, label="Shadow Shift Amount", value=40)
+                    m_shadow_start_op = gr.Slider(minimum=0.0, maximum=1.0, step=0.01, label="Shadow Start Opacity", value=0.4)
+                    m_shadow_decay = gr.Slider(minimum=0.0, maximum=1.0, step=0.01, label="Shadow Opacity Decay", value=0.4)
+                    m_shadow_min_op = gr.Slider(minimum=0.0, maximum=1.0, step=0.01, label="Shadow Min Opacity", value=0.4)
                     m_shadow_gamma = gr.Slider(minimum=0.1, maximum=5.0, step=0.1, label="Shadow Decay Gamma", value=1.0)
             
             gr.Markdown("---")
@@ -615,9 +638,10 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
             # Update preview
             def do_preview(video_list, selected_video, frame_idx, preview_source,
                            inpainted_folder, original_folder, mask_folder,
-                           use_gpu, add_borders, color_transfer,
+                           use_gpu, color_transfer,
                            mask_thresh, mask_dilate, mask_blur,
-                           shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence):
+                           shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence,
+                           undo_reverse):
                 if not video_list or not selected_video:
                     return None, 0
                 
@@ -635,7 +659,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                     "original_folder": original_folder,
                     "mask_folder": mask_folder,
                     "use_gpu": use_gpu,
-                    "add_borders": add_borders,
+                    "add_borders": False,
                     "enable_color_transfer": color_transfer,
                     "mask_binarize_threshold": float(mask_thresh if mask_thresh is not None else -1.0),
                     "mask_dilate_kernel_size": int(mask_dilate or 0),
@@ -645,7 +669,8 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                     "shadow_opacity_decay": float(shadow_decay if shadow_decay is not None else 0.1),
                     "shadow_min_opacity": float(shadow_min_op if shadow_min_op is not None else 0.0),
                     "shadow_decay_gamma": float(shadow_gamma if shadow_gamma is not None else 1.0),
-                    "convergence": int(convergence or 0),
+                    "convergence": int(convergence or 35),
+                    "undo_reverse": undo_reverse,
                     "preview_source": preview_source,
                 }
                 try:
@@ -662,10 +687,10 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                 inputs=[
                     m_video_list_state, m_video_dropdown, m_frame_slider, m_preview_source,
                     m_inpainted_folder, m_original_folder, m_mask_folder,
-                    m_use_gpu, m_add_borders, m_color_transfer,
+                    m_use_gpu, m_color_transfer,
                     m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                    m_convergence
+                    m_convergence, m_undo_reverse
                 ],
                 outputs=[m_preview_image, m_frame_slider]
             )
@@ -673,24 +698,26 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
             # Auto-preview on video selection change
             def on_video_change(video_list, selected_video, preview_source,
                                 inpainted_folder, original_folder, mask_folder,
-                                use_gpu, add_borders, color_transfer,
+                                use_gpu, color_transfer,
                                 mask_thresh, mask_dilate, mask_blur,
-                                shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence):
+                                shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence,
+                                undo_reverse):
                 return do_preview(video_list, selected_video, 0, preview_source,
                                   inpainted_folder, original_folder, mask_folder,
-                                  use_gpu, add_borders, color_transfer,
+                                  use_gpu, color_transfer,
                                   mask_thresh, mask_dilate, mask_blur,
-                                  shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence)
+                                  shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence,
+                                  undo_reverse)
             
             m_video_dropdown.change(
                 fn=on_video_change,
                 inputs=[
                     m_video_list_state, m_video_dropdown, m_preview_source,
                     m_inpainted_folder, m_original_folder, m_mask_folder,
-                    m_use_gpu, m_add_borders, m_color_transfer,
+                    m_use_gpu, m_color_transfer,
                     m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                    m_convergence
+                    m_convergence, m_undo_reverse
                 ],
                 outputs=[m_preview_image, m_frame_slider]
             )
@@ -699,16 +726,16 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
             _auto_preview_inputs = [
                 m_video_list_state, m_video_dropdown, m_frame_slider, m_preview_source,
                 m_inpainted_folder, m_original_folder, m_mask_folder,
-                m_use_gpu, m_add_borders, m_color_transfer,
+                m_use_gpu, m_color_transfer,
                 m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
                 m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                m_convergence
+                m_convergence, m_undo_reverse
             ]
             _auto_preview_outputs = [m_preview_image, m_frame_slider]
             
             for _ctrl in [m_preview_source, m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
                           m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                          m_use_gpu, m_add_borders, m_color_transfer, m_convergence, m_frame_slider]:
+                          m_use_gpu, m_color_transfer, m_convergence, m_frame_slider, m_undo_reverse]:
                 _ctrl.change(
                     fn=do_preview,
                     inputs=_auto_preview_inputs,
@@ -719,7 +746,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
             def save_video_settings(video_list, selected_video,
                                     mask_thresh, mask_dilate, mask_blur,
                                     shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma,
-                                    convergence, output_format, use_gpu, color_transfer, add_borders):
+                                    convergence, output_format, use_gpu, color_transfer, undo_reverse):
                 if not video_list or not selected_video:
                     return "No video selected."
                 
@@ -740,11 +767,12 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                     "shadow_opacity_decay": float(shadow_decay if shadow_decay is not None else 0.1),
                     "shadow_min_opacity": float(shadow_min_op if shadow_min_op is not None else 0.0),
                     "shadow_decay_gamma": float(shadow_gamma if shadow_gamma is not None else 1.0),
-                    "convergence": int(convergence or 0),
+                    "convergence": int(convergence or 35),
+                    "undo_reverse": undo_reverse,
                     "output_format": output_format,
                     "use_gpu": use_gpu,
                     "enable_color_transfer": color_transfer,
-                    "add_borders": add_borders,
+                    "add_borders": False,
                 }
                 
                 sidecar_path = os.path.splitext(video_info["inpainted"])[0] + ".mergesettings.json"
@@ -758,7 +786,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                     m_video_list_state, m_video_dropdown,
                     m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                    m_convergence, m_output_format, m_use_gpu, m_color_transfer, m_add_borders
+                    m_convergence, m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse
                 ],
                 outputs=[m_settings_status]
             )
@@ -766,7 +794,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
             # Load per-video settings
             def load_video_settings(video_list, selected_video):
                 if not video_list or not selected_video:
-                    return [-1.0, 0, 0, 0, 0.7, 0.1, 0.0, 1.0, 0, "Half SBS (Left-Right)", True, False, True, "No video selected."]
+                    return [-1.0, 13, 3, 40, 0.4, 0.4, 0.4, 1.0, 35, "Full SBS (Left-Right)", True, True, False, "No video selected."]
                 
                 video_info = None
                 for v in video_list:
@@ -774,11 +802,11 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                         video_info = v
                         break
                 if not video_info:
-                    return [-1.0, 0, 0, 0, 0.7, 0.1, 0.0, 1.0, 0, "Half SBS (Left-Right)", True, False, True, "Video not found."]
+                    return [-1.0, 13, 3, 40, 0.4, 0.4, 0.4, 1.0, 35, "Full SBS (Left-Right)", True, True, False, "Video not found."]
                 
                 sidecar_path = os.path.splitext(video_info["inpainted"])[0] + ".mergesettings.json"
                 if not os.path.exists(sidecar_path):
-                    return [-1.0, 0, 0, 0, 0.7, 0.1, 0.0, 1.0, 0, "Half SBS (Left-Right)", True, False, True,
+                    return [-1.0, 13, 3, 40, 0.4, 0.4, 0.4, 1.0, 35, "Full SBS (Left-Right)", True, True, False,
                             f"No saved settings found for {selected_video}"]
                 
                 try:
@@ -786,22 +814,22 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                         s = json.load(f)
                     return [
                         s.get("mask_binarize_threshold", -1.0),
-                        s.get("mask_dilate_kernel_size", 0),
-                        s.get("mask_blur_kernel_size", 0),
-                        s.get("shadow_shift", 0),
-                        s.get("shadow_start_opacity", 0.7),
-                        s.get("shadow_opacity_decay", 0.1),
-                        s.get("shadow_min_opacity", 0.0),
+                        s.get("mask_dilate_kernel_size", 13),
+                        s.get("mask_blur_kernel_size", 3),
+                        s.get("shadow_shift", 40),
+                        s.get("shadow_start_opacity", 0.4),
+                        s.get("shadow_opacity_decay", 0.4),
+                        s.get("shadow_min_opacity", 0.4),
                         s.get("shadow_decay_gamma", 1.0),
-                        s.get("convergence", 0),
-                        s.get("output_format", "Half SBS (Left-Right)"),
+                        s.get("convergence", 35),
+                        s.get("output_format", "Full SBS (Left-Right)"),
                         s.get("use_gpu", True),
-                        s.get("enable_color_transfer", False),
-                        s.get("add_borders", True),
+                        s.get("enable_color_transfer", True),
+                        s.get("undo_reverse", False),
                         f"✅ Loaded settings from {os.path.basename(sidecar_path)}"
                     ]
                 except Exception as e:
-                    return [-1.0, 0, 0, 0, 0.7, 0.1, 0.0, 1.0, 0, "Half SBS (Left-Right)", True, False, True,
+                    return [-1.0, 13, 3, 40, 0.4, 0.4, 0.4, 1.0, 35, "Full SBS (Left-Right)", True, True, False,
                             f"Error loading settings: {e}"]
             
             m_load_settings_btn.click(
@@ -810,7 +838,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                 outputs=[
                     m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                    m_convergence, m_output_format, m_use_gpu, m_color_transfer, m_add_borders,
+                    m_convergence, m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse,
                     m_settings_status
                 ]
             )
@@ -820,11 +848,11 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                 fn=process_merging,
                 inputs=[
                     m_inpainted_folder, m_original_folder, m_mask_folder, m_output_folder,
-                    m_use_gpu, m_pad_to_16_9, m_add_borders, m_resume, m_output_format, m_batch_chunk_size, m_color_transfer,
+                    m_use_gpu, m_output_format, m_batch_chunk_size, m_color_transfer,
                     m_codec, m_output_crf,
                     m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                    m_convergence
+                    m_convergence, m_undo_reverse
                 ],
                 outputs=[m_file_prog, m_sub_prog, m_prog_text, m_output]
             )

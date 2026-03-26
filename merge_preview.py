@@ -177,8 +177,14 @@ def generate_preview_frame(video_info, settings, frame_index=0):
         original_reader = splatted_reader
 
     # Load single frame
-    inpainted_np = inpainted_reader.get_batch([frame_index]).asnumpy()
-    splatted_np = splatted_reader.get_batch([frame_index]).asnumpy()
+    inpainted_idx = frame_index
+    splatted_idx = frame_index
+    if settings.get("undo_reverse", False):
+        inpainted_idx = num_frames - 1 - frame_index
+        splatted_idx = num_frames - 1 - frame_index
+
+    inpainted_np = inpainted_reader.get_batch([inpainted_idx]).asnumpy()
+    splatted_np = splatted_reader.get_batch([splatted_idx]).asnumpy()
 
     inpainted_tensor_full = torch.from_numpy(inpainted_np).permute(0, 3, 1, 2).float() / 255.0
     splatted_tensor = torch.from_numpy(splatted_np).permute(0, 3, 1, 2).float() / 255.0
