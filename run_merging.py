@@ -55,11 +55,7 @@ def run_batch_process(settings, single_video_path=None):
         logger.info("No .mp4 files found in the inpainted video folder.")
         return
 
-    inpainted_videos = sorted(glob.glob(os.path.join(settings["inpainted_folder"], "*.mp4")))
-
-    if not inpainted_videos:
-        logger.info("All videos have already been processed (Resume mode).")
-        return
+    conflict_policy = settings.get("conflict_policy", "skip")
 
     total_videos = len(inpainted_videos)
     sidecar_manager = SidecarConfigManager()
@@ -130,18 +126,25 @@ def run_batch_process(settings, single_video_path=None):
                 is_dual_input = True
 
             if not splatted_file_path or not os.path.exists(splatted_file_path):
-                logger.error(f"Missing required splatted file for '{core_name}'. Skipping.")
+                msg = f"Error: Missing required splatted file for core name '{core_name}'."
+                fix = f"Fix: Ensure that Section 1 (Warping) was run and produced a file matching '{core_name}_*_splatted2.mp4' or '*_splatted4.mp4' in {mask_folder}."
+                logger.error(f"{msg} {fix}")
                 continue
 
             inpainted_reader = VideoReader(inpainted_video_path, ctx=cpu(0))
             splatted_reader = VideoReader(splatted_file_path, ctx=cpu(0))
 
+            original_video_path = find_video_by_core_name(s.get("original_folder"), core_name)
+
             original_reader = None
             if is_dual_input:
-                original_video_path = find_video_by_core_name(settings["original_folder"], core_name)
-
                 if original_video_path and os.path.exists(original_video_path):
                     original_reader = VideoReader(original_video_path, ctx=cpu(0))
+                else:
+                    msg = f"Error: Original Left Eye video not found for '{core_name}'."
+                    fix = f"Fix: Ensure '{core_name}.mp4' exists in the original folder: {settings['original_folder']}"
+                    logger.error(f"{msg} {fix}")
+                    continue
             else:
                 original_reader = splatted_reader
 
@@ -181,6 +184,16 @@ def run_batch_process(settings, single_video_path=None):
 
             output_filename = f"{core_name}_{perceived_width_for_filename}{output_suffix}"
             output_path = os.path.join(settings["output_folder"], output_filename)
+
+            if os.path.exists(output_path):
+                if conflict_policy == "skip":
+                    logger.info(f"Skipping {base_name} (Output already exists at {output_path})")
+                    # This line helps app.py's progress parser move the overall file count forward
+                    print(f"Skipping {base_name}: Already exists", flush=True)
+                    continue
+                elif conflict_policy == "overwrite":
+                    logger.info(f"Overwriting {output_path} (policy: overwrite)")
+                    os.remove(output_path)
 
             ffmpeg_process = start_ffmpeg_pipe_process(
                 content_width=output_width,
@@ -351,16 +364,82 @@ def run_batch_process(settings, single_video_path=None):
 
                     blended_right_eye = warped_original * (1 - processed_mask) + inpainted * processed_mask
 
-                    # Convergence adjustment (horizontal shift of right eye)
+                    # Convergence adjustment (horizontal shift of both eyes)
                     convergence = int(s.get("convergence", 0))
+                    conv_mode = s.get("convergence_mode", "Black Bars")
+
                     if convergence != 0:
-                        shifted = torch.zeros_like(blended_right_eye)
-                        if convergence > 0:
-                            shifted[:, :, :, convergence:] = blended_right_eye[:, :, :, :-convergence]
-                        else:
-                            c = -convergence
-                            shifted[:, :, :, :-c] = blended_right_eye[:, :, :, c:]
-                        blended_right_eye = shifted
+                        # Balanced shift: right moves +C/2, left moves -C/2 (approx)
+                        # We ensure (shift_r - shift_l) == convergence
+                        shift_r = convergence // 2
+                        shift_l = shift_r - convergence
+                        
+                        _, _, H, W = blended_right_eye.shape
+                        
+                        if conv_mode == "Auto-Zoom":
+                            # Minimum zoom factor to hide the shift
+                            max_shift = max(abs(shift_l), abs(shift_r))
+                            zoom_factor = W / (W - 2 * max_shift)
+                            new_W = int(round(W * zoom_factor))
+                            new_H = int(round(H * zoom_factor))
+                            
+                            # Zoom both
+                            original_left = F.interpolate(original_left, size=(new_H, new_W), mode="bicubic", align_corners=False)
+                            blended_right_eye = F.interpolate(blended_right_eye, size=(new_H, new_W), mode="bicubic", align_corners=False)
+                            
+                            # Recalculate shifts for zoomed dimensions
+                            # We must crop WxH including the shift.
+                            
+                            c_x, c_y = new_W // 2, new_H // 2
+                            half_w, half_h = W // 2, H // 2
+                            
+                            # For right eye: center (c_x, c_y) + shift_r
+                            start_x_r = c_x - half_w + shift_r
+                            start_y_r = c_y - half_h
+                            blended_right_eye = blended_right_eye[:, :, start_y_r : start_y_r + H, start_x_r : start_x_r + W]
+                            
+                            # For left eye: center (c_x, c_y) + shift_l
+                            start_x_l = c_x - half_w + shift_l
+                            start_y_l = c_y - half_h
+                            original_left = original_left[:, :, start_y_l : start_y_l + H, start_x_l : start_x_l + W]
+                            
+                        elif conv_mode == "Reflect Padding":
+                            # Apply shift to Left Eye
+                            if shift_l != 0:
+                                if shift_l > 0: # shift right: pad left, crop right
+                                    original_left = torch.stack([F.pad(original_left[i:i+1, :, :, :-shift_l], (shift_l, 0, 0, 0), mode='reflect')[0] for i in range(original_left.shape[0])])
+                                else: # shift left: pad right, crop left
+                                    s_val = -shift_l
+                                    original_left = torch.stack([F.pad(original_left[i:i+1, :, :, s_val:], (0, s_val, 0, 0), mode='reflect')[0] for i in range(original_left.shape[0])])
+                            
+                            # Apply shift to Right Eye
+                            if shift_r != 0:
+                                if shift_r > 0: # shift right: pad left, crop right
+                                    blended_right_eye = torch.stack([F.pad(blended_right_eye[i:i+1, :, :, :-shift_r], (shift_r, 0, 0, 0), mode='reflect')[0] for i in range(blended_right_eye.shape[0])])
+                                else: # shift left: pad right, crop left
+                                    s_val = -shift_r
+                                    blended_right_eye = torch.stack([F.pad(blended_right_eye[i:i+1, :, :, s_val:], (0, s_val, 0, 0), mode='reflect')[0] for i in range(blended_right_eye.shape[0])])
+                                    
+                        else: # "Black Bars"
+                            # Left shift
+                            if shift_l != 0:
+                                shifted_l = torch.zeros_like(original_left)
+                                if shift_l > 0:
+                                    shifted_l[:, :, :, shift_l:] = original_left[:, :, :, :-shift_l]
+                                else:
+                                    s_val = -shift_l
+                                    shifted_l[:, :, :, :-s_val] = original_left[:, :, :, s_val:]
+                                original_left = shifted_l
+                            
+                            # Right shift
+                            if shift_r != 0:
+                                shifted_r = torch.zeros_like(blended_right_eye)
+                                if shift_r > 0:
+                                    shifted_r[:, :, :, shift_r:] = blended_right_eye[:, :, :, :-shift_r]
+                                else:
+                                    s_val = -shift_r
+                                    shifted_r[:, :, :, :-s_val] = blended_right_eye[:, :, :, s_val:]
+                                blended_right_eye = shifted_r
 
 
                     if output_format == "Full SBS (Left-Right)":
@@ -409,7 +488,7 @@ def run_batch_process(settings, single_video_path=None):
                         frame_np = frame_tensor.permute(1, 2, 0).numpy()
                         frame_uint16 = (np.clip(frame_np, 0.0, 1.0) * 65535.0).astype(np.uint16)
                         frame_bgr = cv2.cvtColor(frame_uint16, cv2.COLOR_RGB2BGR)
-                        ffmpeg_process.stdin.write(frame_bgr.tobytes())
+                        ffmpeg_process.stdin.write(np.ascontiguousarray(frame_bgr).tobytes())
     
                     pbar.update(len(frame_indices))
                     

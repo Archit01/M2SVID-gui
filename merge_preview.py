@@ -293,16 +293,83 @@ def generate_preview_frame(video_info, settings, frame_index=0):
 
     blended_right_eye = warped_original * (1 - processed_mask) + inpainted * processed_mask
 
-    # Convergence adjustment (horizontal shift of right eye)
+    # Convergence adjustment (horizontal shift of both eyes)
     convergence = int(settings.get("convergence", 0))
+    conv_mode = settings.get("convergence_mode", "Black Bars")
+
     if convergence != 0:
-        shifted = torch.zeros_like(blended_right_eye)
-        if convergence > 0:
-            shifted[:, :, :, convergence:] = blended_right_eye[:, :, :, :-convergence]
-        else:
-            c = -convergence
-            shifted[:, :, :, :-c] = blended_right_eye[:, :, :, c:]
-        blended_right_eye = shifted
+        # Balanced shift: right moves +C/2, left moves -C/2 (approx)
+        # We ensure (shift_r - shift_l) == convergence
+        shift_r = convergence // 2
+        shift_l = shift_r - convergence
+        
+        _, _, H, W = blended_right_eye.shape
+        
+        if conv_mode == "Auto-Zoom":
+            # Minimum zoom factor to hide the shift
+            max_shift = max(abs(shift_l), abs(shift_r))
+            zoom_factor = W / (W - 2 * max_shift)
+            new_W = int(round(W * zoom_factor))
+            new_H = int(round(H * zoom_factor))
+            
+            # Zoom both
+            original_left = F.interpolate(original_left, size=(new_H, new_W), mode="bicubic", align_corners=False)
+            blended_right_eye = F.interpolate(blended_right_eye, size=(new_H, new_W), mode="bicubic", align_corners=False)
+            
+            # Recalculate shifts for zoomed dimensions
+            # Actually, simply cropping the center WxH and THEN shifting would lead to black bars again.
+            # We must crop WxH including the shift.
+            
+            c_x, c_y = new_W // 2, new_H // 2
+            half_w, half_h = W // 2, H // 2
+            
+            # For right eye: center (c_x, c_y) + shift_r
+            start_x_r = c_x - half_w + shift_r
+            start_y_r = c_y - half_h
+            blended_right_eye = blended_right_eye[:, :, start_y_r : start_y_r + H, start_x_r : start_x_r + W]
+            
+            # For left eye: center (c_x, c_y) + shift_l
+            start_x_l = c_x - half_w + shift_l
+            start_y_l = c_y - half_h
+            original_left = original_left[:, :, start_y_l : start_y_l + H, start_x_l : start_x_l + W]
+            
+        elif conv_mode == "Reflect Padding":
+            # Apply shift to Left Eye
+            if shift_l != 0:
+                if shift_l > 0: # shift right: pad left, crop right
+                    original_left = F.pad(original_left[:, :, :, :-shift_l], (shift_l, 0, 0, 0), mode='reflect')
+                else: # shift left: pad right, crop left
+                    s = -shift_l
+                    original_left = F.pad(original_left[:, :, :, s:], (0, s, 0, 0), mode='reflect')
+            
+            # Apply shift to Right Eye
+            if shift_r != 0:
+                if shift_r > 0: # shift right: pad left, crop right
+                    blended_right_eye = F.pad(blended_right_eye[:, :, :, :-shift_r], (shift_r, 0, 0, 0), mode='reflect')
+                else: # shift left: pad right, crop left
+                    s = -shift_r
+                    blended_right_eye = F.pad(blended_right_eye[:, :, :, s:], (0, s, 0, 0), mode='reflect')
+                    
+        else: # "Black Bars"
+            # Left shift
+            if shift_l != 0:
+                shifted_l = torch.zeros_like(original_left)
+                if shift_l > 0:
+                    shifted_l[:, :, :, shift_l:] = original_left[:, :, :, :-shift_l]
+                else:
+                    s = -shift_l
+                    shifted_l[:, :, :, :-s] = original_left[:, :, :, s:]
+                original_left = shifted_l
+            
+            # Right shift
+            if shift_r != 0:
+                shifted_r = torch.zeros_like(blended_right_eye)
+                if shift_r > 0:
+                    shifted_r[:, :, :, shift_r:] = blended_right_eye[:, :, :, :-shift_r]
+                else:
+                    s = -shift_r
+                    shifted_r[:, :, :, :-s] = blended_right_eye[:, :, :, s:]
+                blended_right_eye = shifted_r
 
     # Apply borders
     if settings.get("add_borders", True) and (left_border > 0 or right_border > 0):

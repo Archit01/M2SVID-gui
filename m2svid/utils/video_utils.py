@@ -55,25 +55,25 @@ def open_ffmpeg_process(output_path, width, height, fps, grayscale=False, no_com
             ffmpeg
             .input('pipe:', format='rawvideo', pix_fmt=input_pix_fmt, s=f'{width}x{height}', framerate=fps)
             .output(output_path, pix_fmt=output_pix_fmt, vcodec='libx264', crf=0)
-            .global_args('-loglevel', 'error')
-            .run_async(pipe_stdin=True)
+            .global_args('-loglevel', 'warning')
+            .run_async(pipe_stdin=True, pipe_stderr=True)
         )
     else:
         if crf is not None:
             ffmpeg_process = (
                 ffmpeg
                 .input('pipe:', format='rawvideo', pix_fmt=input_pix_fmt, s=f'{width}x{height}', framerate=fps)
-                .output(output_path, pix_fmt=output_pix_fmt, vcodec='libx264', crf=crf)
-                .global_args('-loglevel', 'error')
-                .run_async(pipe_stdin=True)
+                .output(output_path, pix_fmt=output_pix_fmt, vcodec='libx264', crf=crf, **({'profile:v': 'high10'} if bit_depth == 10 else {}))
+                .global_args('-loglevel', 'warning')
+                .run_async(pipe_stdin=True, pipe_stderr=True)
             )
         else:
             ffmpeg_process = (
                 ffmpeg
                 .input('pipe:', format='rawvideo', pix_fmt=input_pix_fmt, s=f'{width}x{height}', framerate=fps)
-                .output(output_path, pix_fmt=output_pix_fmt, vcodec='libx264')
-                .global_args('-loglevel', 'error')
-                .run_async(pipe_stdin=True)
+                .output(output_path, pix_fmt=output_pix_fmt, vcodec='libx264', **({'profile:v': 'high10'} if bit_depth == 10 else {}))
+                .global_args('-loglevel', 'warning')
+                .run_async(pipe_stdin=True, pipe_stderr=True)
             )
     return ffmpeg_process
 

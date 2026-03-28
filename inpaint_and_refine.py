@@ -338,9 +338,9 @@ for ci, chunk_info in enumerate(tqdm(chunk_schedule, desc="Temporal Chunks")):
             final_frame = blended.clip(0, 255).astype(np.uint8)
 
         # Output to ffmpeg unless this is a tail frame of a non-last chunk
-        is_tail = f_rel >= (actual_len - c_tail_overlap)
+        is_tail = (f_rel >= actual_len - c_tail_overlap)
         if not is_tail:
-            process.stdin.write(final_frame.tobytes())
+            process.stdin.write(np.ascontiguousarray(final_frame).tobytes())
         else:
             new_overlap_buffer.append(final_frame)
 

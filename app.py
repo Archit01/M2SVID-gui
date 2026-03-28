@@ -8,6 +8,27 @@ import shutil
 import json
 import sys
 import platform
+import logging
+
+
+# Set up logging for cleaner debugging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def check_file_conflicts(files, target_folders, suffixes):
+    """Checks if any proposed output files already exist."""
+    conflicts = []
+    for video_path in files:
+        base_name = os.path.splitext(os.path.basename(video_path))[0]
+        # Check potential outputs
+        for folder, sfx in zip(target_folders, suffixes):
+            if folder:
+                # Handle Merging's dynamic suffixes if needed, 
+                # but for Warping/Inpainting it's usually static
+                path = os.path.join(folder, f"{base_name}{sfx}")
+                if os.path.exists(path):
+                    conflicts.append(os.path.basename(path))
+    return conflicts
 
 def browse_folder(current_val):
     """Open a native Windows folder picker dialog using PowerShell (no tkinter needed)."""
@@ -52,6 +73,7 @@ def run_subprocess_with_progress(cmd, env, progress_desc="Processing"):
     
     buffer = ""
     full_log = []
+    last_perc = 0
     while True:
         char = process.stdout.read(1)
         if not char and process.poll() is not None:
@@ -62,13 +84,20 @@ def run_subprocess_with_progress(cmd, env, progress_desc="Processing"):
                     full_log.append(buffer)
                     match = percent_re.search(buffer)
                     if match:
-                        perc = int(match.group(1))
-                        desc = progress_desc
-                        if ":" in buffer:
-                            desc_part = buffer.split(":")[0].strip()
-                            desc_part = re.sub(r'[^a-zA-Z0-9\s-]', '', desc_part)
-                            desc = f"{progress_desc} - {desc_part}"
-                        yield perc, desc
+                        last_perc = int(match.group(1))
+                    
+                    desc = progress_desc
+                    if ":" in buffer:
+                        desc_part = buffer.split(":")[0].strip()
+                        # Preserve alphanumeric, spaces, dashes, slashes and dots for progress info
+                        desc_part = re.sub(r'[^a-zA-Z0-9\s\-/.]', '', desc_part)
+                        desc = f"{progress_desc} - {desc_part}"
+                    else:
+                        # If no colon, use the buffer itself but cleaned safely
+                        clean_buffer = re.sub(r'[^a-zA-Z0-9\s\-/.]', '', buffer)
+                        desc = f"{progress_desc} - {clean_buffer}"
+                        
+                    yield last_perc, desc
                 buffer = ""
             else:
                 buffer += char
@@ -102,7 +131,7 @@ def reverse_video(path):
 def process_warping(
     input_folder, depth_folder, left_eye_folder, high_res_folder, low_res_folder,
     disparity_perc, high_batch, high_res, enable_low_res, low_batch, low_res,
-    reverse_output=False
+    reverse_output=False, conflict_policy="skip"
 ):
     if not input_folder or not os.path.isdir(input_folder):
         yield 0, 0, "Input folder does not exist.", "Error"
@@ -139,10 +168,48 @@ def process_warping(
         
         depth_path = os.path.join(depth_folder, f"{base_name}_depth.mp4")
         if not os.path.exists(depth_path):
-            yield file_perc, 0, f"Skipping {filename} (no depth file)", "Running"
+            error_msg = f"Error: No depth map found for {filename}."
+            fix_msg = f"Fix: Ensure '{base_name}_depth.mp4' exists in the Depth folder: {depth_folder}"
+            yield file_perc, 0, f"{error_msg} | {fix_msg}", "Error"
             continue
         
         yield file_perc, 0, f"Processing {filename}...", "Running"
+        
+        # Load per-video settings if available
+        active_disparity = disparity_perc
+        sidecar_path = os.path.splitext(video_path)[0] + ".warpsettings.json"
+        if os.path.exists(sidecar_path):
+            try:
+                with open(sidecar_path, "r") as f:
+                    s = json.load(f)
+                    if "disparity_perc" in s:
+                        active_disparity = s["disparity_perc"]
+                        logger.info(f"Using per-video disparity {active_disparity} for {filename}")
+            except Exception as e:
+                logger.error(f"Error loading sidecar for {filename}: {e}")
+
+        # Conflict Check
+        left_eye_out = os.path.join(left_eye_folder, f"{base_name}_lefteye.mp4")
+        high_res_out = os.path.join(high_res_folder, f"{base_name}_{w_high}_splatted2.mp4")
+        
+        target_outputs = [left_eye_out, high_res_out]
+        if enable_low_res:
+            w_low, _ = parse_res(low_res)
+            target_outputs.append(os.path.join(low_res_folder, f"{base_name}_{w_low}_splatted2.mp4"))
+            
+            
+        existing_outputs = [p for p in target_outputs if os.path.exists(p)]
+        
+        if existing_outputs:
+            if conflict_policy == "skip":
+                yield file_perc, 100, f"Skipping {filename} (Outputs already exist)", "Running"
+                continue
+            else:
+                yield file_perc, 0, f"Overwriting {filename} (Deleting existing outputs)", "Running"
+                for out_file in existing_outputs:
+                    try: os.remove(out_file)
+                    except: pass
+        
 
         # 1. Downscale Left Eye
         left_eye_out = os.path.join(left_eye_folder, f"{base_name}_lefteye.mp4")
@@ -182,7 +249,7 @@ def process_warping(
             "--video_path", high_res_in_path,
             "--depth_path", depth_path,
             "--output_path", high_res_out,
-            "--disparity_perc", str(disparity_perc),
+            "--disparity_perc", str(active_disparity),
             "--batch_size", str(high_batch),
             "--crf", "14",
             "--bit_depth", "10"
@@ -190,8 +257,6 @@ def process_warping(
         for sub_perc, desc in run_subprocess_with_progress(cmd_warp_high, env_vars, f"High Res Warping"):
             yield file_perc, sub_perc, f"File {i+1}/{total_files} | {filename} - {desc}", "Running"
 
-        if temp_high_res and os.path.exists(temp_high_res):
-            os.remove(temp_high_res)
 
         # 3. Low Res Warping (Optional, on downscaled video)
         if enable_low_res:
@@ -202,7 +267,7 @@ def process_warping(
                 "--video_path", left_eye_out,
                 "--depth_path", depth_path,
                 "--output_path", low_res_out,
-                "--disparity_perc", str(disparity_perc),
+                "--disparity_perc", str(active_disparity),
                 "--batch_size", str(low_batch),
                 "--crf", "14",
                 "--bit_depth", "10"
@@ -210,7 +275,8 @@ def process_warping(
             for sub_perc, desc in run_subprocess_with_progress(cmd_warp_low, env_vars, f"Low Res Warping"):
                 yield file_perc, sub_perc, f"File {i+1}/{total_files} | {filename} - {desc}", "Running"
 
-        # 4. Final Reversal (at the end of all steps for this video)
+
+        # 5. Final Reversal (at the end of all steps for this video)
         if reverse_output:
             yield file_perc, 90, f"{filename} - Finalizing (Reversing Output Videos)", "Running"
             reverse_video(left_eye_out)
@@ -218,13 +284,16 @@ def process_warping(
             if enable_low_res:
                 reverse_video(low_res_out)
 
+        if temp_high_res and os.path.exists(temp_high_res):
+            os.remove(temp_high_res)
+
 
     yield 100, 100, "All files processed.", "Warping Section Processing Complete!"
 
 def process_inpainting(
     left_eye_folder, grid_folder, output_folder,
     mask_antialias, tile_size, tile_overlap, chunk_size, overlap, original_input_blend_strength,
-    model_variant
+    model_variant, conflict_policy="skip"
 ):
     if not left_eye_folder or not os.path.isdir(left_eye_folder):
         yield 0, 0, 0, "Left Eye folder does not exist.", "Error"
@@ -239,7 +308,7 @@ def process_inpainting(
     os.makedirs(output_folder, exist_ok=True)
     
     inpaint_env = env_vars.copy()
-    inpaint_env['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
+    inpaint_env['PYTORCH_ALLOC_CONF'] = 'max_split_size_mb:128'
 
     left_eye_files = glob.glob(os.path.join(left_eye_folder, "*_lefteye.mp4"))
     total_files = len(left_eye_files)
@@ -253,11 +322,25 @@ def process_inpainting(
         filename = os.path.basename(left_eye_path)
         base_name = filename.replace("_lefteye.mp4", "")
         
-        # Discover grid video containing the matched base name
+        # Conflict Check
+        pattern = os.path.join(output_folder, f"{base_name}_*_inpainted_right_eye.mp4")
+        existing_outputs = glob.glob(pattern)
+        if existing_outputs:
+            if conflict_policy == "skip":
+                yield file_perc, 100, 100, f"Skipping {filename} (Inpainted output already exists)", "Running"
+                continue
+            else:
+                yield file_perc, 0, 0, f"Overwriting {filename} (Deleting existing inpainting)", "Running"
+                for out_file in existing_outputs:
+                    try: os.remove(out_file)
+                    except: pass
+        
         grid_pattern = os.path.join(grid_folder, f"{base_name}_*_splatted2.mp4")
         grid_matches = glob.glob(grid_pattern)
         if not grid_matches:
-            yield file_perc, 0, 0, f"Skipping {filename} (no grid video found)", "Running"
+            error_msg = f"Error: No grid video found for {filename}."
+            fix_msg = f"Fix: Ensure that Section 1 (Warping) has been completed and the output file matching '{base_name}_*_splatted2.mp4' exists in the grid folder: {grid_folder}"
+            yield file_perc, 0, 0, f"{error_msg} | {fix_msg}", "Error"
             continue
             
         grid_video_path = grid_matches[0] 
@@ -317,21 +400,25 @@ def process_inpainting(
     yield 100, 100, 100, "All files processed.", "Inpainting Section Processing Complete!"
 
 def process_merging(
+    has_conflicts,
     inpainted_folder, original_folder, mask_folder, output_folder,
     use_gpu, output_format, batch_chunk_size, enable_color_transfer,
     codec, output_crf,
     mask_binarize_threshold, mask_dilate_kernel_size, mask_blur_kernel_size,
     shadow_shift, shadow_start_opacity, shadow_opacity_decay, shadow_min_opacity, shadow_decay_gamma,
-    convergence, undo_reverse=False
+    convergence, convergence_mode, undo_reverse=False, conflict_policy="skip"
 ):
+    if has_conflicts:
+        return
     if not inpainted_folder or not os.path.exists(inpainted_folder):
         yield 0, 0, "Error: Inpainted folder invalid or does not exist.", "Failed"
         return
         
     os.makedirs(output_folder, exist_ok=True)
     
-    # Build global settings (fallback for videos without per-video settings)
+    # Build global settings
     global_settings = {
+        "conflict_policy": conflict_policy,
         "inpainted_folder": inpainted_folder,
         "original_folder": original_folder,
         "mask_folder": mask_folder,
@@ -355,6 +442,7 @@ def process_merging(
         "shadow_min_opacity": float(shadow_min_opacity if shadow_min_opacity is not None else 0.4),
         "shadow_decay_gamma": float(shadow_decay_gamma if shadow_decay_gamma is not None else 1.0),
         "convergence": int(convergence or 35),
+        "convergence_mode": convergence_mode,
         "encoding_quality": "Medium",
         "encoding_tune": "None",
         "color_tags": "Auto",
@@ -412,6 +500,9 @@ def process_merging(
 with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
     gr.Markdown("# M2SVID Pipeline Processing")
     
+    # ---- State for scanned warping video list ----
+    w_video_list_state = gr.State([])
+    
     with gr.Tabs():
         with gr.Tab("Section 1: Warping"):
             gr.Markdown("Warp videos using depth maps with optional low-res generation for inpainting.")
@@ -435,6 +526,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                         w_lowres_folder = gr.Textbox(label="Output: Low Res Warped Folder", value="demo/warped_low", scale=4)
                         w_lowres_btn = gr.Button("Browse", scale=1)
                     
+                    
             with gr.Row():
                 with gr.Column(variant="panel"):
                     gr.Markdown("### High Res Settings")
@@ -448,6 +540,33 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                     w_low_batch = gr.Number(label="Low Res Batch Size", value=10, precision=0)
                     w_low_res = gr.Textbox(label="Low Res Output Resolution (W x H)", value="1280x704")
                     
+            gr.Markdown("---")
+            gr.Markdown("### Video Preview & Selection")
+            
+            with gr.Row():
+                w_scan_btn = gr.Button("🔍 Scan Videos", variant="secondary")
+                w_video_dropdown = gr.Dropdown(label="Select Video", choices=[], interactive=True, scale=3)
+                w_video_info = gr.Textbox(label="Video Info", interactive=False, scale=2)
+            
+            with gr.Row():
+                with gr.Column(scale=3):
+                    w_preview_image = gr.Image(label="Preview", type="pil", height=480)
+                with gr.Column(scale=1):
+                    w_preview_source = gr.Dropdown(
+                        label="Preview Source",
+                        choices=[
+                            "Reprojected Right", "Original Left", "Inpainting Mask", "Side-by-Side", "Top-Bottom (Mask/Warp)"
+                        ],
+                        value="Reprojected Right"
+                    )
+                    w_frame_slider = gr.Slider(minimum=0, maximum=100, step=1, label="Frame #", value=0)
+                    w_preview_btn = gr.Button("🖼️ Update Preview", variant="secondary")
+                    gr.Markdown("---")
+                    w_save_settings_btn = gr.Button("💾 Save Settings for This Video")
+                    w_load_settings_btn = gr.Button("📂 Load Settings for This Video")
+                    w_settings_status = gr.Textbox(label="Settings Status", interactive=False)
+
+            gr.Markdown("---")
             with gr.Row():
                 w_file_prog = gr.Slider(minimum=0, maximum=100, step=1, label="Overall File Progress (%)", interactive=False)
                 w_sub_prog = gr.Slider(minimum=0, maximum=100, step=1, label="Current Stage Progress (%)", interactive=False)
@@ -456,21 +575,236 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
             w_btn = gr.Button("Start Batch Warping", variant="primary")
             w_output = gr.Textbox(label="Status")
             
+            w_has_conflicts = gr.State(False)
+            
+            # --- Conflict Resolution UI (Hidden by default) ---
+            with gr.Column(visible=False, variant="panel") as w_conflict_group:
+                w_conflict_msg = gr.Markdown()
+                with gr.Row():
+                    w_skip_btn = gr.Button("⏭️ Skip Existing & Start", variant="secondary")
+                    w_overwrite_btn = gr.Button("💥 Overwrite All & Start", variant="stop")
+                    w_cancel_btn = gr.Button("❌ Cancel")
+            
             w_input_btn.click(fn=browse_folder, inputs=[w_input_folder], outputs=[w_input_folder])
             w_depth_btn.click(fn=browse_folder, inputs=[w_depth_folder], outputs=[w_depth_folder])
             w_lefteye_btn.click(fn=browse_folder, inputs=[w_lefteye_folder], outputs=[w_lefteye_folder])
             w_hires_btn.click(fn=browse_folder, inputs=[w_hires_folder], outputs=[w_hires_folder])
             w_lowres_btn.click(fn=browse_folder, inputs=[w_lowres_folder], outputs=[w_lowres_folder])
-            
+
+            # ---- Warping Preview Handlers ----
+            def do_scan_videos_warping(input_f, depth_f):
+                from warp_preview import scan_videos
+                vlist = scan_videos(input_f, depth_f)
+                if not vlist:
+                    return [], gr.update(choices=[], value=None), "No valid videos/depth pairs found."
+                names = [v["base_name"] for v in vlist]
+                return vlist, gr.update(choices=names, value=names[0]), f"Found {len(vlist)} video(s)"
+
+            w_scan_btn.click(
+                fn=do_scan_videos_warping,
+                inputs=[w_input_folder, w_depth_folder],
+                outputs=[w_video_list_state, w_video_dropdown, w_video_info]
+            )
+
+            def do_preview_warping(video_list, selected_video, frame_idx, preview_source, disparity_perc):
+                if not video_list or not selected_video:
+                    return None, 0
+                
+                video_info = None
+                for v in video_list:
+                    if v["base_name"] == selected_video:
+                        video_info = v
+                        break
+                if not video_info:
+                    return None, 0
+                
+                from warp_preview import generate_preview_frame
+                settings = {"disparity_perc": disparity_perc, "preview_source": preview_source}
+                try:
+                    img, total_frames = generate_preview_frame(video_info, settings, int(frame_idx))
+                    return img, gr.update(maximum=max(total_frames - 1, 0))
+                except Exception as e:
+                    print(f"Preview error: {e}")
+                    return None, 0
+
+            w_preview_btn.click(
+                fn=do_preview_warping,
+                inputs=[w_video_list_state, w_video_dropdown, w_frame_slider, w_preview_source, w_disparity],
+                outputs=[w_preview_image, w_frame_slider]
+            )
+
+            # Auto-preview on param change
+            for _ctrl in [w_disparity, w_preview_source, w_frame_slider]:
+                _ctrl.change(
+                    fn=do_preview_warping,
+                    inputs=[w_video_list_state, w_video_dropdown, w_frame_slider, w_preview_source, w_disparity],
+                    outputs=[w_preview_image, w_frame_slider]
+                )
+
+            # Save/Load per-video settings
+            def save_video_settings_warping(video_list, selected_video, disparity_perc):
+                if not video_list or not selected_video: return "No video selected."
+                video_info = next((v for v in video_list if v["base_name"] == selected_video), None)
+                if not video_info: return "Video not found."
+                
+                settings_to_save = {"disparity_perc": float(disparity_perc)}
+                sidecar_path = os.path.splitext(video_info["video"])[0] + ".warpsettings.json"
+                with open(sidecar_path, "w") as f:
+                    json.dump(settings_to_save, f, indent=2)
+                return f"✅ Saved settings to {os.path.basename(sidecar_path)}"
+
+            w_save_settings_btn.click(
+                fn=save_video_settings_warping,
+                inputs=[w_video_list_state, w_video_dropdown, w_disparity],
+                outputs=[w_settings_status]
+            )
+
+            def load_video_settings_warping(video_list, selected_video):
+                if not video_list or not selected_video: return gr.update(), "No video selected."
+                video_info = next((v for v in video_list if v["base_name"] == selected_video), None)
+                if not video_info: return gr.update(), "Video not found."
+                
+                sidecar_path = os.path.splitext(video_info["video"])[0] + ".warpsettings.json"
+                if not os.path.exists(sidecar_path):
+                    return gr.update(), f"No saved settings found for {selected_video}"
+                
+                try:
+                    with open(sidecar_path, "r") as f:
+                        s = json.load(f)
+                    return s.get("disparity_perc", gr.update()), f"✅ Loaded settings from {os.path.basename(sidecar_path)}"
+                except Exception as e:
+                    return gr.update(), f"Error loading settings: {e}"
+
+            w_load_settings_btn.click(
+                fn=load_video_settings_warping,
+                inputs=[w_video_list_state, w_video_dropdown],
+                outputs=[w_disparity, w_settings_status]
+            )
+
+            # Auto-preview & Load on video choice
+            w_video_dropdown.change(
+                fn=load_video_settings_warping,
+                inputs=[w_video_list_state, w_video_dropdown],
+                outputs=[w_disparity, w_settings_status]
+            ).then(
+                fn=do_preview_warping,
+                inputs=[w_video_list_state, w_video_dropdown, gr.State(0), w_preview_source, w_disparity],
+                outputs=[w_preview_image, w_frame_slider]
+            )
+
+            def start_warping_flow(
+                input_f, depth_f, lefteye_f, hires_f, lowres_f,
+                disparity, high_batch, high_res, enable_low, low_batch, low_res,
+                reverse_out
+            ):
+                # 1. Validation
+                if not input_f or not os.path.isdir(input_f):
+                    return { w_output: "Error: Input folder invalid.", w_has_conflicts: False }
+                
+                active_hires = hires_f
+                active_lowres = lowres_f
+
+                # 2. Conflict Scan
+                video_files = glob.glob(os.path.join(input_f, "*.mp4"))
+                w_high, _ = parse_res(high_res)
+                target_folders = [lefteye_f, hires_f]
+                suffixes = ["_lefteye.mp4", f"_{w_high}_splatted2.mp4"]
+                if enable_low:
+                    target_folders.append(lowres_f)
+                    w_low, _ = parse_res(low_res)
+                    suffixes.append(f"_{w_low}_splatted2.mp4")
+                
+                
+                conflicts = check_file_conflicts(video_files, target_folders, suffixes)
+                
+                if conflicts:
+                    conflict_text = "### ⚠️ Conflicts Detected\nThe following output files already exist:\n- " + "\n- ".join(conflicts[:10])
+                    if len(conflicts) > 10:
+                        conflict_text += f"\n- ...and {len(conflicts)-10} more"
+                    conflict_text += "\n\n**What would you like to do?**"
+                    return {
+                        w_conflict_group: gr.update(visible=True),
+                        w_conflict_msg: gr.update(value=conflict_text),
+                        w_btn: gr.update(interactive=False),
+                        w_has_conflicts: True
+                    }
+                
+                # 3. No conflicts, start immediately
+                return {
+                    w_conflict_group: gr.update(visible=False),
+                    w_btn: gr.update(interactive=False),
+                    w_has_conflicts: False
+                }
+
+            # We need to handle the actual processing trigger from multiple points (Direct start or conflict buttons)
+            def run_warping_batch(
+                has_conflicts,
+                input_folder, depth_folder, left_eye_folder, high_res_folder, low_res_folder,
+                disparity_perc, high_batch, high_res, enable_low_res, low_batch, low_res,
+                reverse_output, conflict_policy="skip"
+            ):
+                if has_conflicts:
+                    return
+                
+                active_hires = high_res_folder
+                active_lowres = low_res_folder
+
+                # Overwrite logic: delete files if policy is overwrite
+                if conflict_policy == "overwrite":
+                    video_files = glob.glob(os.path.join(input_folder, "*.mp4"))
+                    w_high, _ = parse_res(high_res)
+                    target_folders = [left_eye_folder, high_res_folder]
+                    suffixes = ["_lefteye.mp4", f"_{w_high}_splatted2.mp4"]
+                    if enable_low_res:
+                        target_folders.append(low_res_folder)
+                        w_low, _ = parse_res(low_res)
+                        suffixes.append(f"_{w_low}_splatted2.mp4")
+                    
+
+                    for video_path in video_files:
+                        base_name = os.path.splitext(os.path.basename(video_path))[0]
+                        for folder, sfx in zip(target_folders, suffixes):
+                            path = os.path.join(folder, f"{base_name}{sfx}")
+                            if os.path.exists(path):
+                                os.remove(path)
+
+                # Call the original processing function
+                yield from process_warping(
+                    input_folder, depth_folder, left_eye_folder, high_res_folder, low_res_folder,
+                    disparity_perc, high_batch, high_res, enable_low_res, low_batch, low_res,
+                    reverse_output
+                )
+
+            # Define common inputs for warping batch
+            _w_inputs = [
+                w_input_folder, w_depth_folder, w_lefteye_folder, w_hires_folder, w_lowres_folder,
+                w_disparity, w_high_batch, w_high_res, w_enable_low, w_low_batch, w_low_res,
+                w_reverse_out
+            ]
+
             w_btn.click(
-                fn=process_warping,
-                inputs=[
-                    w_input_folder, w_depth_folder, w_lefteye_folder, w_hires_folder, w_lowres_folder,
-                    w_disparity, w_high_batch, w_high_res, w_enable_low, w_low_batch, w_low_res,
-                    w_reverse_out
-                ],
+                fn=start_warping_flow,
+                inputs=_w_inputs,
+                outputs=[w_conflict_group, w_conflict_msg, w_btn, w_has_conflicts]
+            ).then(
+                fn=run_warping_batch,
+                inputs=[w_has_conflicts] + _w_inputs,
                 outputs=[w_file_prog, w_sub_prog, w_prog_text, w_output]
             )
+
+            w_skip_btn.click(
+                fn=run_warping_batch,
+                inputs=[gr.State(False)] + _w_inputs + [gr.State("skip")],
+                outputs=[w_file_prog, w_sub_prog, w_prog_text, w_output]
+            ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [w_conflict_group, w_btn])
+
+            w_overwrite_btn.click(
+                fn=run_warping_batch,
+                inputs=[gr.State(False)] + _w_inputs + [gr.State("overwrite")],
+                outputs=[w_file_prog, w_sub_prog, w_prog_text, w_output]
+            ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [w_conflict_group, w_btn])
+            
+            w_cancel_btn.click(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [w_conflict_group, w_btn])
 
         with gr.Tab("Section 2: Inpainting and Refine"):
             gr.Markdown("Inpaint right eyes using downscaled Left Eye and Grid Video chunks.")
@@ -507,19 +841,104 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
             i_btn = gr.Button("Start Batch Inpainting", variant="primary")
             i_output = gr.Textbox(label="Status")
             
+            i_has_conflicts = gr.State(False)
+            
+            # --- Conflict Resolution UI (Hidden by default) ---
+            with gr.Column(visible=False, variant="panel") as i_conflict_group:
+                i_conflict_msg = gr.Markdown()
+                with gr.Row():
+                    i_skip_btn = gr.Button("⏭️ Skip Existing & Start", variant="secondary")
+                    i_overwrite_btn = gr.Button("💥 Overwrite All & Start", variant="stop")
+                    i_cancel_btn = gr.Button("❌ Cancel")
+            
             i_lefteye_btn.click(fn=browse_folder, inputs=[i_lefteye_folder], outputs=[i_lefteye_folder])
             i_grid_btn.click(fn=browse_folder, inputs=[i_grid_folder], outputs=[i_grid_folder])
             i_output_btn.click(fn=browse_folder, inputs=[i_output_folder], outputs=[i_output_folder])
 
+            def start_inpainting_flow(
+                left_eye_f, grid_f, output_f,
+                mask_antialias, tile_size, tile_overlap, chunk_size, overlap, blend_strength,
+                model_variant
+            ):
+                if not left_eye_f or not os.path.isdir(left_eye_f):
+                    return { i_output: "Error: Left Eye folder invalid.", i_has_conflicts: False }
+                
+                # Conflict Scan
+                left_eye_files = glob.glob(os.path.join(left_eye_f, "*_lefteye.mp4"))
+                conflicts = []
+                for le_path in left_eye_files:
+                    base = os.path.basename(le_path).replace("_lefteye.mp4", "")
+                    # We need to know the width of the grid to check conflicts, but width is dynamic.
+                    # We'll check for ANY *_inpainted_right_eye.mp4 starting with this base name.
+                    pattern = os.path.join(output_f, f"{base}_*_inpainted_right_eye.mp4")
+                    if glob.glob(pattern):
+                        conflicts.append(f"{base}_[width]_inpainted_right_eye.mp4")
+                if conflicts:
+                    conflict_text = f"### ⚠️ Conflicts Detected\nInpainted outputs already exist for {len(conflicts)} file(s).\n\n**What would you like to do?**"
+                    return {
+                        i_conflict_group: gr.update(visible=True),
+                        i_conflict_msg: gr.update(value=conflict_text),
+                        i_btn: gr.update(interactive=False),
+                        i_has_conflicts: True
+                    }
+                return {
+                    i_conflict_group: gr.update(visible=False),
+                    i_btn: gr.update(interactive=False),
+                    i_has_conflicts: False
+                }
+
+            def run_inpainting_batch(
+                has_conflicts,
+                left_eye_folder, grid_folder, output_folder,
+                mask_antialias, tile_size, tile_overlap, chunk_size, overlap, blend_strength,
+                model_variant, conflict_policy="skip"
+            ):
+                if has_conflicts:
+                    return
+                if conflict_policy == "overwrite":
+                    left_eye_files = glob.glob(os.path.join(left_eye_folder, "*_lefteye.mp4"))
+                    for le_path in left_eye_files:
+                        base = os.path.basename(le_path).replace("_lefteye.mp4", "")
+                        pattern = os.path.join(output_folder, f"{base}_*_inpainted_right_eye.mp4")
+                        for existing in glob.glob(pattern):
+                            os.remove(existing)
+                            
+                yield from process_inpainting(
+                    left_eye_folder, grid_folder, output_folder,
+                    mask_antialias, tile_size, tile_overlap, chunk_size, overlap, blend_strength,
+                    model_variant
+                )
+
+            # Define common inputs for inpainting batch
+            _i_inputs = [
+                i_lefteye_folder, i_grid_folder, i_output_folder,
+                i_mask_antialias, i_tile_size, i_tile_overlap, i_chunk_size, i_overlap, i_original_input_blend_strength,
+                i_model_variant
+            ]
+
             i_btn.click(
-                fn=process_inpainting,
-                inputs=[
-                    i_lefteye_folder, i_grid_folder, i_output_folder,
-                    i_mask_antialias, i_tile_size, i_tile_overlap, i_chunk_size, i_overlap, i_original_input_blend_strength,
-                    i_model_variant
-                ],
+                fn=start_inpainting_flow,
+                inputs=_i_inputs,
+                outputs=[i_conflict_group, i_conflict_msg, i_btn, i_has_conflicts]
+            ).then(
+                fn=run_inpainting_batch,
+                inputs=[i_has_conflicts] + _i_inputs,
                 outputs=[i_file_prog, i_temp_prog, i_spat_prog, i_prog_text, i_output]
             )
+
+            i_skip_btn.click(
+                fn=run_inpainting_batch,
+                inputs=[gr.State(False)] + _i_inputs + [gr.State("skip")],
+                outputs=[i_file_prog, i_temp_prog, i_spat_prog, i_prog_text, i_output]
+            ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [i_conflict_group, i_btn])
+
+            i_overwrite_btn.click(
+                fn=run_inpainting_batch,
+                inputs=[gr.State(False)] + _i_inputs + [gr.State("overwrite")],
+                outputs=[i_file_prog, i_temp_prog, i_spat_prog, i_prog_text, i_output]
+            ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [i_conflict_group, i_btn])
+            
+            i_cancel_btn.click(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [i_conflict_group, i_btn])
 
         with gr.Tab("Section 3: Merging GUI"):
             gr.Markdown("Finalize videos, merge mask outputs and encode in various SBS 3D formats.")
@@ -560,6 +979,12 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                     with gr.Row():
                         m_batch_chunk_size = gr.Number(label="GPU Frame Chunk Size", value=10, precision=0)
                         m_convergence = gr.Slider(minimum=-100, maximum=100, step=1, label="Horizontal Convergence", value=35)
+                    with gr.Row():
+                        m_convergence_mode = gr.Dropdown(
+                            label="Convergence Mode",
+                            choices=["Black Bars", "Reflect Padding", "Auto-Zoom"],
+                            value="Auto-Zoom"
+                        )
                     with gr.Row():
                         m_codec = gr.Dropdown(label="FFmpeg Codec", choices=["Auto", "H.264", "H.265"], value="H.265")
                         m_output_crf = gr.Number(label="Output CRF (Quality)", value=14, precision=0)
@@ -614,6 +1039,16 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
             m_btn = gr.Button("🚀 Start Batch Merging", variant="primary")
             m_output = gr.Textbox(label="Status")
             
+            m_has_conflicts = gr.State(False)
+            
+            # --- Conflict Resolution UI (Hidden by default) ---
+            with gr.Column(visible=False, variant="panel") as m_conflict_group:
+                m_conflict_msg = gr.Markdown()
+                with gr.Row():
+                    m_skip_btn = gr.Button("⏭️ Skip Existing & Start", variant="secondary")
+                    m_overwrite_btn = gr.Button("💥 Overwrite All & Start", variant="stop")
+                    m_cancel_btn = gr.Button("❌ Cancel")
+            
             # ---- Event handlers ----
             m_inpainted_btn.click(fn=browse_folder, inputs=[m_inpainted_folder], outputs=[m_inpainted_folder])
             m_original_btn.click(fn=browse_folder, inputs=[m_original_folder], outputs=[m_original_folder])
@@ -640,7 +1075,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                            inpainted_folder, original_folder, mask_folder,
                            use_gpu, color_transfer,
                            mask_thresh, mask_dilate, mask_blur,
-                           shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence,
+                           shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence, convergence_mode,
                            undo_reverse):
                 if not video_list or not selected_video:
                     return None, 0
@@ -670,6 +1105,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                     "shadow_min_opacity": float(shadow_min_op if shadow_min_op is not None else 0.0),
                     "shadow_decay_gamma": float(shadow_gamma if shadow_gamma is not None else 1.0),
                     "convergence": int(convergence or 35),
+                    "convergence_mode": convergence_mode,
                     "undo_reverse": undo_reverse,
                     "preview_source": preview_source,
                 }
@@ -690,63 +1126,20 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                     m_use_gpu, m_color_transfer,
                     m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                    m_convergence, m_undo_reverse
+                    m_convergence, m_convergence_mode, m_undo_reverse
                 ],
                 outputs=[m_preview_image, m_frame_slider]
             )
             
-            # Auto-preview on video selection change
-            def on_video_change(video_list, selected_video, preview_source,
-                                inpainted_folder, original_folder, mask_folder,
-                                use_gpu, color_transfer,
-                                mask_thresh, mask_dilate, mask_blur,
-                                shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence,
-                                undo_reverse):
-                return do_preview(video_list, selected_video, 0, preview_source,
-                                  inpainted_folder, original_folder, mask_folder,
-                                  use_gpu, color_transfer,
-                                  mask_thresh, mask_dilate, mask_blur,
-                                  shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence,
-                                  undo_reverse)
-            
-            m_video_dropdown.change(
-                fn=on_video_change,
-                inputs=[
-                    m_video_list_state, m_video_dropdown, m_preview_source,
-                    m_inpainted_folder, m_original_folder, m_mask_folder,
-                    m_use_gpu, m_color_transfer,
-                    m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
-                    m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                    m_convergence, m_undo_reverse
-                ],
-                outputs=[m_preview_image, m_frame_slider]
-            )
-            
-            # Auto-preview on any parameter change
-            _auto_preview_inputs = [
-                m_video_list_state, m_video_dropdown, m_frame_slider, m_preview_source,
-                m_inpainted_folder, m_original_folder, m_mask_folder,
-                m_use_gpu, m_color_transfer,
-                m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
-                m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                m_convergence, m_undo_reverse
-            ]
-            _auto_preview_outputs = [m_preview_image, m_frame_slider]
-            
-            for _ctrl in [m_preview_source, m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
-                          m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                          m_use_gpu, m_color_transfer, m_convergence, m_frame_slider, m_undo_reverse]:
-                _ctrl.change(
-                    fn=do_preview,
-                    inputs=_auto_preview_inputs,
-                    outputs=_auto_preview_outputs
-                )
+            # Set status for Merging
+            def set_merging_status(text):
+                return text
             
             # Save per-video settings
             def save_video_settings(video_list, selected_video,
                                     mask_thresh, mask_dilate, mask_blur,
                                     shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma,
-                                    convergence, output_format, use_gpu, color_transfer, undo_reverse):
+                                    convergence, convergence_mode, output_format, use_gpu, color_transfer, undo_reverse):
                 if not video_list or not selected_video:
                     return "No video selected."
                 
@@ -768,6 +1161,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                     "shadow_min_opacity": float(shadow_min_op if shadow_min_op is not None else 0.0),
                     "shadow_decay_gamma": float(shadow_gamma if shadow_gamma is not None else 1.0),
                     "convergence": int(convergence or 35),
+                    "convergence_mode": convergence_mode,
                     "undo_reverse": undo_reverse,
                     "output_format": output_format,
                     "use_gpu": use_gpu,
@@ -779,14 +1173,14 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                 with open(sidecar_path, "w") as f:
                     json.dump(settings_to_save, f, indent=2)
                 return f"✅ Saved settings to {os.path.basename(sidecar_path)}"
-            
+
             m_save_settings_btn.click(
                 fn=save_video_settings,
                 inputs=[
                     m_video_list_state, m_video_dropdown,
                     m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                    m_convergence, m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse
+                    m_convergence, m_convergence_mode, m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse
                 ],
                 outputs=[m_settings_status]
             )
@@ -794,7 +1188,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
             # Load per-video settings
             def load_video_settings(video_list, selected_video):
                 if not video_list or not selected_video:
-                    return [-1.0, 13, 3, 40, 0.4, 0.4, 0.4, 1.0, 35, "Full SBS (Left-Right)", True, True, False, "No video selected."]
+                    return [gr.update()]*14 + ["No video selected."]
                 
                 video_info = None
                 for v in video_list:
@@ -802,35 +1196,91 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                         video_info = v
                         break
                 if not video_info:
-                    return [-1.0, 13, 3, 40, 0.4, 0.4, 0.4, 1.0, 35, "Full SBS (Left-Right)", True, True, False, "Video not found."]
+                    return [gr.update()]*14 + ["Video not found."]
                 
                 sidecar_path = os.path.splitext(video_info["inpainted"])[0] + ".mergesettings.json"
                 if not os.path.exists(sidecar_path):
-                    return [-1.0, 13, 3, 40, 0.4, 0.4, 0.4, 1.0, 35, "Full SBS (Left-Right)", True, True, False,
-                            f"No saved settings found for {selected_video}"]
+                    # No sidecar: don't revert to hardcoded defaults, just keep current GUI state
+                    return [gr.update()]*14 + [f"No saved settings found for {selected_video}"]
                 
                 try:
                     with open(sidecar_path, "r") as f:
                         s = json.load(f)
                     return [
-                        s.get("mask_binarize_threshold", -1.0),
-                        s.get("mask_dilate_kernel_size", 13),
-                        s.get("mask_blur_kernel_size", 3),
-                        s.get("shadow_shift", 40),
-                        s.get("shadow_start_opacity", 0.4),
-                        s.get("shadow_opacity_decay", 0.4),
-                        s.get("shadow_min_opacity", 0.4),
-                        s.get("shadow_decay_gamma", 1.0),
-                        s.get("convergence", 35),
-                        s.get("output_format", "Full SBS (Left-Right)"),
-                        s.get("use_gpu", True),
-                        s.get("enable_color_transfer", True),
-                        s.get("undo_reverse", False),
+                        s.get("mask_binarize_threshold", gr.update()),
+                        s.get("mask_dilate_kernel_size", gr.update()),
+                        s.get("mask_blur_kernel_size", gr.update()),
+                        s.get("shadow_shift", gr.update()),
+                        s.get("shadow_start_opacity", gr.update()),
+                        s.get("shadow_opacity_decay", gr.update()),
+                        s.get("shadow_min_opacity", gr.update()),
+                        s.get("shadow_decay_gamma", gr.update()),
+                        s.get("convergence", gr.update()),
+                        s.get("convergence_mode", gr.update()),
+                        s.get("output_format", gr.update()),
+                        s.get("use_gpu", gr.update()),
+                        s.get("enable_color_transfer", gr.update()),
+                        s.get("undo_reverse", gr.update()),
                         f"✅ Loaded settings from {os.path.basename(sidecar_path)}"
                     ]
                 except Exception as e:
-                    return [-1.0, 13, 3, 40, 0.4, 0.4, 0.4, 1.0, 35, "Full SBS (Left-Right)", True, True, False,
-                            f"Error loading settings: {e}"]
+                    return [gr.update()]*14 + [f"Error loading settings: {e}"]
+
+            # Auto-preview on video selection change
+            def on_video_change(video_list, selected_video, preview_source,
+                                inpainted_folder, original_folder, mask_folder,
+                                use_gpu, color_transfer,
+                                mask_thresh, mask_dilate, mask_blur,
+                                shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence, convergence_mode,
+                                undo_reverse):
+                return do_preview(video_list, selected_video, 0, preview_source,
+                                  inpainted_folder, original_folder, mask_folder,
+                                  use_gpu, color_transfer,
+                                  mask_thresh, mask_dilate, mask_blur,
+                                  shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence, convergence_mode,
+                                  undo_reverse)
+            
+            m_video_dropdown.change(
+                fn=on_video_change,
+                inputs=[
+                    m_video_list_state, m_video_dropdown, m_preview_source,
+                    m_inpainted_folder, m_original_folder, m_mask_folder,
+                    m_use_gpu, m_color_transfer,
+                    m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+                    m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
+                    m_convergence, m_convergence_mode, m_undo_reverse
+                ],
+                outputs=[m_preview_image, m_frame_slider]
+            ).then(
+                fn=load_video_settings,
+                inputs=[m_video_list_state, m_video_dropdown],
+                outputs=[
+                    m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+                    m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
+                    m_convergence, m_convergence_mode, m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse,
+                    m_settings_status
+                ]
+            )
+            
+            # Auto-preview on any parameter change
+            _auto_preview_inputs = [
+                m_video_list_state, m_video_dropdown, m_frame_slider, m_preview_source,
+                m_inpainted_folder, m_original_folder, m_mask_folder,
+                m_use_gpu, m_color_transfer,
+                m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+                m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
+                m_convergence, m_convergence_mode, m_undo_reverse
+            ]
+            _auto_preview_outputs = [m_preview_image, m_frame_slider]
+            
+            for _ctrl in [m_preview_source, m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+                          m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
+                          m_use_gpu, m_color_transfer, m_convergence, m_convergence_mode, m_frame_slider, m_undo_reverse]:
+                _ctrl.change(
+                    fn=do_preview,
+                    inputs=_auto_preview_inputs,
+                    outputs=_auto_preview_outputs
+                )
             
             m_load_settings_btn.click(
                 fn=load_video_settings,
@@ -838,24 +1288,110 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                 outputs=[
                     m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                    m_convergence, m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse,
+                    m_convergence, m_convergence_mode, m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse,
                     m_settings_status
                 ]
             )
             
             # Batch merging
+            def start_merging_flow(
+                inpainted_f, original_f, mask_f, output_f,
+                use_gpu, output_format, batch_chunk_size, color_transfer,
+                codec, crf,
+                mask_bin, mask_dilate, mask_blur,
+                shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma,
+                convergence, convergence_mode, undo_reverse
+            ):
+                if not inpainted_f or not os.path.isdir(inpainted_f):
+                    return { m_output: "Error: Inpainted folder invalid.", m_has_conflicts: False }
+                
+                # Conflict Scan
+                # Scan for both standard inpainted and SBS inpainted videos
+                inp_patterns = ["*_inpainted_right_eye.mp4", "*_inpainted_sbs.mp4"]
+                inpainted_videos = []
+                for p in inp_patterns:
+                    inpainted_videos.extend(glob.glob(os.path.join(inpainted_f, p)))
+                
+                conflicts = []
+                
+                # Suffix mapping for scanning
+                suffix_map = {
+                    "Full SBS Cross-eye (Right-Left)": "_merged_full_sbsx.mp4",
+                    "Full SBS (Left-Right)": "_merged_full_sbs.mp4",
+                    "Half SBS (Left-Right)": "_merged_half_sbs.mp4",
+                    "Anaglyph (Red/Cyan)": "_merged_anaglyph.mp4",
+                    "Anaglyph Half-Color": "_merged_anaglyph.mp4",
+                    "Right-Eye Only": "_merged_right_eye.mp4"
+                }
+                target_sfx = suffix_map.get(output_format, "_merged_*.mp4")
+
+                for vid in inpainted_videos:
+                    # Identical logic to run_merging.py for core name extraction
+                    vid_base = os.path.basename(vid)
+                    match = re.search(r"_inpainted_(right_eye|sbs)F?\.mp4$", vid_base)
+                    if not match: continue
+                    core_with_width = vid_base[: -len(match.group(0))]
+                    
+                    # Extract core name by stripping the width suffix (e.g. video_1280 -> video)
+                    last_und = core_with_width.rfind("_")
+                    if last_und == -1: core_name = core_with_width
+                    else: core_name = core_with_width[:last_und]
+                    
+                    # Robust Pattern check (core_name_*_merged_suffix.mp4)
+                    # This catches conflicts even if the resolution suffix is different
+                    pattern = os.path.join(output_f, f"{core_name}_*{target_sfx}")
+                    matches = glob.glob(pattern)
+                    if matches:
+                        for m in matches:
+                            conflicts.append(os.path.basename(m))
+                if conflicts:
+                    conflict_text = f"### ⚠️ Conflicts Detected\nMerged outputs already exist for {len(conflicts)} file(s).\n\n**What would you like to do?**"
+                    return {
+                        m_conflict_group: gr.update(visible=True),
+                        m_conflict_msg: gr.update(value=conflict_text),
+                        m_btn: gr.update(interactive=False),
+                        m_has_conflicts: True
+                    }
+                return {
+                    m_conflict_group: gr.update(visible=False),
+                    m_btn: gr.update(interactive=False),
+                    m_has_conflicts: False
+                }
+
+            # Define processing trigger
+            _m_inputs = [
+                m_inpainted_folder, m_original_folder, m_mask_folder, m_output_folder,
+                m_use_gpu, m_output_format, m_batch_chunk_size, m_color_transfer,
+                m_codec, m_output_crf,
+                m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+                m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
+                m_convergence, m_convergence_mode, m_undo_reverse
+            ]
+            _m_outputs = [m_file_prog, m_sub_prog, m_prog_text, m_output]
+
             m_btn.click(
+                fn=start_merging_flow,
+                inputs=_m_inputs,
+                outputs=[m_conflict_group, m_conflict_msg, m_btn, m_has_conflicts]
+            ).then(
                 fn=process_merging,
-                inputs=[
-                    m_inpainted_folder, m_original_folder, m_mask_folder, m_output_folder,
-                    m_use_gpu, m_output_format, m_batch_chunk_size, m_color_transfer,
-                    m_codec, m_output_crf,
-                    m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
-                    m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                    m_convergence, m_undo_reverse
-                ],
-                outputs=[m_file_prog, m_sub_prog, m_prog_text, m_output]
+                inputs=[m_has_conflicts] + _m_inputs,
+                outputs=_m_outputs
             )
+
+            m_skip_btn.click(
+                fn=process_merging,
+                inputs=[gr.State(False)] + _m_inputs + [gr.State("skip")],
+                outputs=_m_outputs
+            ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [m_conflict_group, m_btn])
+
+            m_overwrite_btn.click(
+                fn=process_merging,
+                inputs=[gr.State(False)] + _m_inputs + [gr.State("overwrite")],
+                outputs=_m_outputs
+            ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [m_conflict_group, m_btn])
+            
+            m_cancel_btn.click(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [m_conflict_group, m_btn])
 
 
 

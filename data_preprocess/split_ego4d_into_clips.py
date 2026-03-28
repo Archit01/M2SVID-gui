@@ -60,7 +60,7 @@ def split_video_into_clips(input_root, video_list, output_root, frames_per_clip=
 
                 try:
                     for frame in batch:
-                        ffmpeg_process.stdin.write(frame.tobytes())
+                        ffmpeg_process.stdin.write(np.ascontiguousarray(frame.astype(np.uint8)).tobytes())
 
                 finally:
                     ffmpeg_process.stdin.close()

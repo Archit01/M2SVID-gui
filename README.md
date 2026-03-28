@@ -29,7 +29,11 @@ This project is a user-friendly GUI version of the original **M2SVID** (Monocula
 - **Git**: [Download and install Git for Windows](https://git-scm.com/download/win).
 
 ### 2. Installation
-1. Clone this repository (or download the ZIP).
+1. Clone this repository recursively:
+   ```bash
+   git clone --recursive https://github.com/Archit01/M2SVID-gui.git
+   ```
+   (Alternatively, download the ZIP and ensure submodules are initialized manually).
 2. Double-click `install_windows.bat`.
    - This will download a portable Python 3.12 environment.
    - It will install all necessary dependencies (PyTorch 2.9.1, CUDA 12.8, xformers, etc.).

@@ -182,7 +182,41 @@ def process_video_with_depth(
             else:
                 mask_rgb = mask_frame
             grid_frame = np.concatenate((mask_rgb, reprojected_frame), axis=1)
-            ffmpeg_process_grid.stdin.write(grid_frame.tobytes())
+            # Ensure the array is robust for the FFmpeg pipe (uint8 and contiguous in memory)
+            grid_frame = np.ascontiguousarray(grid_frame.astype(np.uint8))
+            
+            # Use chunked writes to prevent OSError 22 on Windows for large buffers
+            frame_bytes = grid_frame.tobytes()
+            chunk_size = 1024 * 1024 # 1MB chunks
+            
+            try:
+                for j in range(0, len(frame_bytes), chunk_size):
+                    ffmpeg_process_grid.stdin.write(frame_bytes[j : j + chunk_size])
+                ffmpeg_process_grid.stdin.flush()
+            except (OSError, BrokenPipeError) as e:
+                # Capture stderr if available to diagnose the real cause of the crash
+                error_log = ""
+                try:
+                    if ffmpeg_process_grid.stderr:
+                        # Non-blocking read attempt
+                        import fcntl
+                        import os
+                        # On Windows, fcntl doesn't exist. We'll use a safer approach.
+                    if os.name != 'nt':
+                        import fcntl
+                        import os
+                        fd = ffmpeg_process_grid.stderr.fileno()
+                        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+                        fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+                    
+                    error_log = ffmpeg_process_grid.stderr.read().decode('utf-8', errors='ignore')
+                except:
+                    error_log = "Could not capture FFmpeg stderr."
+                
+                print(f"\n[FFmpeg Error] Pipe write failed: {e}")
+                if error_log:
+                    print(f"--- FFmpeg Log ---\n{error_log}\n------------------")
+                raise
             
         frames_processed += current_batch_size
 

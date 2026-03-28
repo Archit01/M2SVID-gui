@@ -6,16 +6,20 @@ echo Setting up Portable Python 3.12 for M2SVID GUI (Windows)
 echo Using Python 3.12.9 (Portable) and CUDA 12.8
 echo =========================================================
 
+REM Ensure standard Windows utilities are in the PATH (needed for where, curl, tar, etc.)
+set PATH=%SystemRoot%\system32;%SystemRoot%\System32\WindowsPowerShell\v1.0;%PATH%
+
 REM Check for Git
-where git >nul 2>nul
+git --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [WARNING] Git not found. Some dependencies may fail to install.
-    echo Please install Git from https://git-scm.com/download/win
-    pause
+    where git >nul 2>&1
+    if %errorlevel% neq 0 (
+        echo [WARNING] Git not found. Some dependencies may fail to install.
+        echo Please install Git from https://git-scm.com/download/win
+        pause
+    )
 )
 
-REM Ensure standard Windows utilities are in the PATH
-set PATH=%SystemRoot%\system32;%SystemRoot%\System32\WindowsPowerShell\v1.0;%PATH%
 
 set PYTHON_DIR=%CD%\python_embed
 set PYTHON_EXE=%PYTHON_DIR%\python.exe
@@ -62,6 +66,10 @@ if %errorlevel% neq 0 (
     echo    WARNING: xFormers could not be installed.
     echo    The app will use PyTorch native SDPA attention as a fallback.
 )
+
+echo.
+echo 6.5 Patching xFormers for RTX 50-series (Blackwell) support...
+"%PYTHON_EXE%" -c "import os; path = r'python_embed\Lib\site-packages\xformers\ops\fmha\cutlass.py'; content = open(path).read() if os.path.exists(path) else ''; open(path, 'w').write(content.replace('CUDA_MAXIMUM_COMPUTE_CAPABILITY = (9, 0)', 'CUDA_MAXIMUM_COMPUTE_CAPABILITY = (12, 0)')) if content else None; print('✅ Patch Applied (sm_120)') if content else print('⚠️ cutlass.py not found')"
 
 echo.
 echo 7. Installing Triton (Windows)...

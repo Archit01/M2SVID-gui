@@ -95,7 +95,7 @@ def process_video(name, REWRITE):
                     raise ValueError
                 ffmpeg_process_video = open_ffmpeg_process(output_path_video, width * 2, height, fps)
 
-            ffmpeg_process_video.stdin.write(video.astype(np.uint8).tobytes())
+            ffmpeg_process_video.stdin.write(np.ascontiguousarray(video.astype(np.uint8)).tobytes())
 
         ffmpeg_process_video.stdin.close()
 

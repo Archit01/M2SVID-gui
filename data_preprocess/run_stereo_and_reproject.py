@@ -240,9 +240,9 @@ def process_video(name, REWRITE):
                 ffmpeg_process_mask = open_ffmpeg_process(output_path_mask, width, height, fps, grayscale=True, no_compression=True)
                 ffmpeg_process_cropped_video = open_ffmpeg_process(output_path_cropped_video, width * 2, height, fps)
 
-            ffmpeg_process_reprojected.stdin.write(reprojected_right_videos.astype(np.uint8).tobytes())
-            ffmpeg_process_mask.stdin.write(reprojected_right_masks.astype(np.uint8).tobytes())
-            ffmpeg_process_cropped_video.stdin.write(cropped_video.astype(np.uint8).tobytes())
+            ffmpeg_process_reprojected.stdin.write(np.ascontiguousarray(reprojected_right_videos.astype(np.uint8)).tobytes())
+            ffmpeg_process_mask.stdin.write(np.ascontiguousarray(reprojected_right_masks.astype(np.uint8)).tobytes())
+            ffmpeg_process_cropped_video.stdin.write(np.ascontiguousarray(cropped_video.astype(np.uint8)).tobytes())
 
             del frames, left_videos, right_videos, reprojected_right_videos, reprojected_right_masks
 
