@@ -14,17 +14,21 @@ _decord_loaded = False
 VideoReader = None
 cpu_ctx = None
 scatter_image = None
+scatter_image_gpu = None
+_use_gpu_scatter = False
 
 
 def _ensure_imports():
-    global _decord_loaded, VideoReader, cpu_ctx, scatter_image
+    global _decord_loaded, VideoReader, cpu_ctx, scatter_image, scatter_image_gpu, _use_gpu_scatter
 
     if not _decord_loaded:
         from decord import VideoReader as VR, cpu
         VideoReader = VR
         cpu_ctx = cpu
-        from m2svid.warping.warping import scatter_image as _si
+        from m2svid.warping.warping import scatter_image as _si, scatter_image_gpu as _si_gpu, _TORCH_CUDA_AVAILABLE
         scatter_image = _si
+        scatter_image_gpu = _si_gpu
+        _use_gpu_scatter = _TORCH_CUDA_AVAILABLE
         _decord_loaded = True
 
 
@@ -106,7 +110,8 @@ def generate_preview_frame(video_info, settings, frame_index=0):
     # Warping
     # scatter_image(input_frame, inverse_depth, direction, scale_factor, ...)
     # direction=-1 means Right Eye reprojection (standard)
-    reproj_right, mask, _ = scatter_image(
+    _scatter_fn = scatter_image_gpu if _use_gpu_scatter else scatter_image
+    reproj_right, mask, _ = _scatter_fn(
         video_np, depth_gray, direction=-1, scale_factor=disparity_scale, reproject_depth=False
     )
 

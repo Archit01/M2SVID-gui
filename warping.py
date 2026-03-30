@@ -16,7 +16,7 @@ limitations under the License.
 
 import argparse
 from m2svid.utils.video_utils import open_ffmpeg_process, read_frames_in_batches_ffmpeg, get_video_fps
-from m2svid.warping.warping import scatter_image
+from m2svid.warping.warping import scatter_image, scatter_image_gpu, _TORCH_CUDA_AVAILABLE
 
 import numpy as np
 import tqdm
@@ -156,8 +156,9 @@ def process_video_with_depth(
         reprojected_right_videos = []
         reprojected_right_masks = []
 
+        _scatter_fn = scatter_image_gpu if _TORCH_CUDA_AVAILABLE else scatter_image
         for left_frame, disparity in zip(left_frames, disparities):
-            reprojected_image, inpainting_mask, _ = scatter_image(
+            reprojected_image, inpainting_mask, _ = _scatter_fn(
                 left_frame, disparity, direction=-1, scale_factor=1, reproject_depth=True
             )
             reprojected_right_videos.append(reprojected_image)

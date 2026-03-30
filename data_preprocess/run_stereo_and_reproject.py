@@ -17,7 +17,7 @@ limitations under the License.
 import torch
 
 from bidavideo.models.bidastereo_model import BiDAStereoModel
-from m2svid.warping.warping import scatter_image
+from m2svid.warping.warping import scatter_image, scatter_image_gpu, _TORCH_CUDA_AVAILABLE
 from m2svid.utils.video_utils import open_ffmpeg_process, read_frames_in_batches_ffmpeg, get_video_fps, get_total_frames, split_left_right, get_video_frames, \
         save_disparity_as_png
 
@@ -217,8 +217,9 @@ def process_video(name, REWRITE):
             reprojected_right_videos = []
             reprojected_right_masks = []
 
+            _scatter_fn = scatter_image_gpu if _TORCH_CUDA_AVAILABLE else scatter_image
             for left_frame, right_frame, disparity in zip(left_videos, right_videos, disparities):
-                reprojected_image, inpainting_mask, reprojected_depth = scatter_image(left_frame, disparity, direction=-1, scale_factor=1, reproject_depth=True)
+                reprojected_image, inpainting_mask, reprojected_depth = _scatter_fn(left_frame, disparity, direction=-1, scale_factor=1, reproject_depth=True)
                 reprojected_right_videos.append(reprojected_image)
                 reprojected_right_masks.append(inpainting_mask)
 

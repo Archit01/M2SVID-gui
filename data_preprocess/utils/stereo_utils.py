@@ -17,7 +17,7 @@ limitations under the License.
 import torch
 from collections import defaultdict
 import numpy as np
-from m2svid.warping.warping import scatter_image
+from m2svid.warping.warping import scatter_image, scatter_image_gpu, _TORCH_CUDA_AVAILABLE
 
 
 def compute_disparity(model, left_videos, right_videos):
@@ -63,7 +63,8 @@ def compute_shift(model, left_videos, right_videos, iters=20, target_min_dispari
         right_videos_np = right_videos.numpy().transpose(0, 2, 3, 1)
         difference_over_frames = []
         for i in range(len(left_videos_np)):
-            reprojected_right, inpainting_mask, reprojected_depth = scatter_image(left_videos_np[i], disparities_left[i], direction=-1, scale_factor=1, reproject_depth=True)
+            _scatter_fn = scatter_image_gpu if _TORCH_CUDA_AVAILABLE else scatter_image
+            reprojected_right, inpainting_mask, reprojected_depth = _scatter_fn(left_videos_np[i], disparities_left[i], direction=-1, scale_factor=1, reproject_depth=True)
             difference = (np.abs(reprojected_right - right_videos_np[0]) ** 2).sum(axis=-1)
             difference = difference.flatten()[inpainting_mask.flatten() == 0]
             difference_over_frames.append(difference)
