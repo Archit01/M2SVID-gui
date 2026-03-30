@@ -31,12 +31,11 @@ def scatter_image_gpu(
     inverse_ordering: bool = False,
     reproject_depth: bool = False,
 ):
-  """GPU-accelerated scatter_image using PyTorch scatter_add_.
-
-  Drop-in replacement for scatter_image() — same signature, same output.
-  Achieves ~34x speedup on an RTX 5080 for 1080p frames.
-  Note: inverse_ordering is accepted for API compatibility but ignored
-  (it is never used in any call site in this project).
+  """GPU-accelerated scatter_image using PyTorch scatter_reduce for Z-buffering.
+  
+  Drop-in replacement for scatter_image(). Implements rigorous Z-buffering where
+  the source pixel with the highest disparity (closest to camera) wins during
+  occlusions, preventing the ghosting/blending artifacts seen with simple accumulation.
   """
   h, w, c = input_frame.shape
   device = torch.device('cuda')
@@ -47,8 +46,8 @@ def scatter_image_gpu(
 
   # Compute disparity
   disparity = inv_depth * scale_factor
-  disp_int = disparity.to(torch.int64)
-  weight_plus1 = disparity - disp_int.float()
+  disp_int = disparity.to(torch.int64)          # floor towards zero
+  weight_plus1 = disparity - disp_int.float()    # fractional part
   weight_0 = 1.0 - weight_plus1
 
   # Coordinate grids
@@ -63,29 +62,64 @@ def scatter_image_gpu(
   valid0 = (target_x0 >= 0) & (target_x0 < w)
   valid1 = (target_x1 >= 0) & (target_x1 < w)
 
-  # Flat destination indices for scatter_add_
-  reproj_img_flat = torch.zeros(h * w, c, device=device, dtype=torch.float32)
-  weight_flat = torch.zeros(h * w, 1, device=device, dtype=torch.float32)
+  # We pack (disparity_int32 << 32) | source_index
+  # so that scatter_reduce('amax') keeps the source_index with max disparity.
+  # We add 1 to source_index so 0 can mean "empty".
+  flat_src_idx = torch.arange(h * w, device=device, dtype=torch.int64) + 1
+  
+  # Map disparity to a positive integer scaled by 2048 to preserve fractional order
+  scaled_disp = (disparity.reshape(h * w) * 2048.0).long()
+  pack_vals = (scaled_disp << 32) | flat_src_idx
 
+  # -- Scatter Contribution 0 --
+  v0 = valid0.reshape(h * w)
+  valid_idx0 = v0.nonzero(as_tuple=True)[0]
+  
+  flat_dst0 = (y_coords * w + target_x0).reshape(h * w)[valid_idx0].long()
+  pack0 = pack_vals[valid_idx0]
+  
+  zbuf0 = torch.zeros(h * w, device=device, dtype=torch.int64)
+  zbuf0.scatter_reduce_(0, flat_dst0, pack0, reduce='amax', include_self=False)
+
+  # -- Scatter Contribution 1 --
+  v1 = valid1.reshape(h * w)
+  valid_idx1 = v1.nonzero(as_tuple=True)[0]
+  
+  flat_dst1 = (y_coords * w + target_x1).reshape(h * w)[valid_idx1].long()
+  pack1 = pack_vals[valid_idx1]
+  
+  zbuf1 = torch.zeros(h * w, device=device, dtype=torch.int64)
+  zbuf1.scatter_reduce_(0, flat_dst1, pack1, reduce='amax', include_self=False)
+
+  # Now composite the winners
   src_pixels = frame_f.reshape(h * w, c)
   w0_flat = weight_0.reshape(h * w, 1)
   w1_flat = weight_plus1.reshape(h * w, 1)
 
-  # Contribution 0 (integer disparity)
-  flat_dst0 = (y_coords * w + target_x0).reshape(h * w)
-  v0 = valid0.reshape(h * w)
-  valid_idx0 = v0.nonzero(as_tuple=True)[0]
-  dst0 = flat_dst0[valid_idx0].long()
-  reproj_img_flat.scatter_add_(0, dst0.unsqueeze(1).expand(-1, c), src_pixels[valid_idx0] * w0_flat[valid_idx0])
-  weight_flat.scatter_add_(0, dst0.unsqueeze(1), w0_flat[valid_idx0])
+  reproj_img_flat = torch.zeros(h * w, c, device=device, dtype=torch.float32)
+  weight_flat = torch.zeros(h * w, 1, device=device, dtype=torch.float32)
 
-  # Contribution 1 (integer disparity + 1)
-  flat_dst1 = (y_coords * w + target_x1).reshape(h * w)
-  v1 = valid1.reshape(h * w)
-  valid_idx1 = v1.nonzero(as_tuple=True)[0]
-  dst1 = flat_dst1[valid_idx1].long()
-  reproj_img_flat.scatter_add_(0, dst1.unsqueeze(1).expand(-1, c), src_pixels[valid_idx1] * w1_flat[valid_idx1])
-  weight_flat.scatter_add_(0, dst1.unsqueeze(1), w1_flat[valid_idx1])
+  # Winners for 0
+  win_idx0 = (zbuf0 & 0xFFFFFFFF) - 1
+  mask_win0 = win_idx0 >= 0
+  actual_win0 = win_idx0[mask_win0]
+  dst_win0 = mask_win0.nonzero(as_tuple=True)[0]
+
+  contrib0 = src_pixels[actual_win0] * w0_flat[actual_win0]
+  wt0 = w0_flat[actual_win0]
+  reproj_img_flat.scatter_add_(0, dst_win0.unsqueeze(1).expand(-1, c), contrib0)
+  weight_flat.scatter_add_(0, dst_win0.unsqueeze(1), wt0)
+
+  # Winners for 1
+  win_idx1 = (zbuf1 & 0xFFFFFFFF) - 1
+  mask_win1 = win_idx1 >= 0
+  actual_win1 = win_idx1[mask_win1]
+  dst_win1 = mask_win1.nonzero(as_tuple=True)[0]
+
+  contrib1 = src_pixels[actual_win1] * w1_flat[actual_win1]
+  wt1 = w1_flat[actual_win1]
+  reproj_img_flat.scatter_add_(0, dst_win1.unsqueeze(1).expand(-1, c), contrib1)
+  weight_flat.scatter_add_(0, dst_win1.unsqueeze(1), wt1)
 
   # Normalize
   weight_3c = weight_flat.expand(-1, c)
@@ -99,20 +133,17 @@ def scatter_image_gpu(
   mask[~filled] = 255
   mask = mask.reshape(h, w)
 
-  # Reproject depth
+  # Reproject depth (if requested)
   if reproject_depth:
       depth_vals = 1.0 / (inv_depth + 1e-6)
       depth_flat = depth_vals.reshape(h * w)
       reproj_depth_flat = torch.zeros(h * w, device=device, dtype=torch.float32)
       reproj_depth_w_flat = torch.zeros(h * w, device=device, dtype=torch.float32)
 
-      w0_1d = weight_0.reshape(h * w)
-      w1_1d = weight_plus1.reshape(h * w)
-
-      reproj_depth_flat.scatter_add_(0, dst0, depth_flat[valid_idx0] * w0_1d[valid_idx0])
-      reproj_depth_w_flat.scatter_add_(0, dst0, w0_1d[valid_idx0])
-      reproj_depth_flat.scatter_add_(0, dst1, depth_flat[valid_idx1] * w1_1d[valid_idx1])
-      reproj_depth_w_flat.scatter_add_(0, dst1, w1_1d[valid_idx1])
+      reproj_depth_flat.scatter_add_(0, dst_win0, depth_flat[actual_win0] * w0_flat.reshape(h*w)[actual_win0])
+      reproj_depth_w_flat.scatter_add_(0, dst_win0, w0_flat.reshape(h*w)[actual_win0])
+      reproj_depth_flat.scatter_add_(0, dst_win1, depth_flat[actual_win1] * w1_flat.reshape(h*w)[actual_win1])
+      reproj_depth_w_flat.scatter_add_(0, dst_win1, w1_flat.reshape(h*w)[actual_win1])
 
       depth_filled = reproj_depth_w_flat != 0
       reproj_depth_flat[depth_filled] /= reproj_depth_w_flat[depth_filled]
