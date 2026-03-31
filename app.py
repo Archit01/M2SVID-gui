@@ -131,7 +131,10 @@ def reverse_video(path):
 def process_warping(
     input_folder, depth_folder, left_eye_folder, high_res_folder, low_res_folder,
     disparity_perc, high_batch, high_res, enable_low_res, low_batch, low_res,
-    reverse_output=False, conflict_policy="skip"
+    reverse_output=False, conflict_policy="skip",
+    dilate_x=0.0, dilate_y=0.0, blur_x=0, blur_y=0,
+    dilate_left=0.0, blur_left=0, blur_left_mix=0.5,
+    use_cuda=False
 ):
     if not input_folder or not os.path.isdir(input_folder):
         yield 0, 0, "Input folder does not exist.", "Error"
@@ -185,8 +188,24 @@ def process_warping(
                     if "disparity_perc" in s:
                         active_disparity = s["disparity_perc"]
                         logger.info(f"Using per-video disparity {active_disparity} for {filename}")
+                    # Load depth preprocessing overrides
+                    active_dilate_x = s.get("dilate_x", dilate_x)
+                    active_dilate_y = s.get("dilate_y", dilate_y)
+                    active_blur_x = s.get("blur_x", blur_x)
+                    active_blur_y = s.get("blur_y", blur_y)
+                    active_dilate_left = s.get("dilate_left", dilate_left)
+                    active_blur_left = s.get("blur_left", blur_left)
+                    active_blur_left_mix = s.get("blur_left_mix", blur_left_mix)
             except Exception as e:
                 logger.error(f"Error loading sidecar for {filename}: {e}")
+        else:
+            active_dilate_x = dilate_x
+            active_dilate_y = dilate_y
+            active_blur_x = blur_x
+            active_blur_y = blur_y
+            active_dilate_left = dilate_left
+            active_blur_left = blur_left
+            active_blur_left_mix = blur_left_mix
 
         # Conflict Check
         left_eye_out = os.path.join(left_eye_folder, f"{base_name}_lefteye.mp4")
@@ -252,8 +271,17 @@ def process_warping(
             "--disparity_perc", str(active_disparity),
             "--batch_size", str(high_batch),
             "--crf", "14",
-            "--bit_depth", "10"
+            "--bit_depth", "10",
+            "--dilate_x", str(active_dilate_x),
+            "--dilate_y", str(active_dilate_y),
+            "--blur_x", str(int(active_blur_x)),
+            "--blur_y", str(int(active_blur_y)),
+            "--dilate_left", str(active_dilate_left),
+            "--blur_left", str(int(active_blur_left)),
+            "--blur_left_mix", str(active_blur_left_mix),
         ]
+        if use_cuda:
+            cmd_warp_high.append("--use_cuda")
         for sub_perc, desc in run_subprocess_with_progress(cmd_warp_high, env_vars, f"High Res Warping"):
             yield file_perc, sub_perc, f"File {i+1}/{total_files} | {filename} - {desc}", "Running"
 
@@ -270,8 +298,17 @@ def process_warping(
                 "--disparity_perc", str(active_disparity),
                 "--batch_size", str(low_batch),
                 "--crf", "14",
-                "--bit_depth", "10"
+                "--bit_depth", "10",
+                "--dilate_x", str(active_dilate_x),
+                "--dilate_y", str(active_dilate_y),
+                "--blur_x", str(int(active_blur_x)),
+                "--blur_y", str(int(active_blur_y)),
+                "--dilate_left", str(active_dilate_left),
+                "--blur_left", str(int(active_blur_left)),
+                "--blur_left_mix", str(active_blur_left_mix),
             ]
+            if use_cuda:
+                cmd_warp_low.append("--use_cuda")
             for sub_perc, desc in run_subprocess_with_progress(cmd_warp_low, env_vars, f"Low Res Warping"):
                 yield file_perc, sub_perc, f"File {i+1}/{total_files} | {filename} - {desc}", "Running"
 
@@ -539,6 +576,26 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                     w_reverse_out = gr.Checkbox(label="Reverse Output Videos", value=False)
                     w_low_batch = gr.Number(label="Low Res Batch Size", value=10, precision=0)
                     w_low_res = gr.Textbox(label="Low Res Output Resolution (W x H)", value="1280x704")
+                    w_use_cuda = gr.Checkbox(label="⚡ Enable CUDA Warping", value=False)
+
+            with gr.Row():
+                with gr.Column(variant="panel"):
+                    gr.Markdown("### Depth Preprocessing")
+                    with gr.Row():
+                        w_dilate_x = gr.Slider(minimum=-10.0, maximum=30.0, value=0.0, step=0.5, label="Dilate X")
+                        w_dilate_y = gr.Slider(minimum=-10.0, maximum=30.0, value=0.0, step=0.5, label="Dilate Y")
+                    with gr.Row():
+                        w_blur_x = gr.Slider(minimum=0, maximum=35, value=0, step=1, label="Blur X")
+                        w_blur_y = gr.Slider(minimum=0, maximum=35, value=0, step=1, label="Blur Y")
+                    with gr.Row():
+                        w_dilate_left = gr.Slider(minimum=0.0, maximum=20.0, value=0.0, step=0.5, label="Dilate Left")
+                        w_blur_left = gr.Slider(minimum=0, maximum=20, value=0, step=1, label="Blur Left")
+                    w_blur_left_mix = gr.Dropdown(
+                        label="Blur Left Mix (H↔V)",
+                        choices=[round(i/10, 1) for i in range(0, 11)],
+                        value=0.5,
+                        allow_custom_value=True
+                    )
                     
             gr.Markdown("---")
             gr.Markdown("### Video Preview & Selection")
@@ -555,7 +612,8 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                     w_preview_source = gr.Dropdown(
                         label="Preview Source",
                         choices=[
-                            "Reprojected Right", "Original Left", "Inpainting Mask", "Side-by-Side", "Top-Bottom (Mask/Warp)"
+                            "Reprojected Right", "Original Left", "Inpainting Mask", "Side-by-Side", "Top-Bottom (Mask/Warp)",
+                            "Depth Map (Raw)", "Depth Map (Processed)"
                         ],
                         value="Reprojected Right"
                     )
@@ -606,7 +664,8 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                 outputs=[w_video_list_state, w_video_dropdown, w_video_info]
             )
 
-            def do_preview_warping(video_list, selected_video, frame_idx, preview_source, disparity_perc):
+            def do_preview_warping(video_list, selected_video, frame_idx, preview_source, disparity_perc,
+                                   dilate_x, dilate_y, blur_x, blur_y, dilate_left, blur_left, blur_left_mix, use_cuda):
                 if not video_list or not selected_video:
                     return None, 0
                 
@@ -619,7 +678,19 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                     return None, 0
                 
                 from warp_preview import generate_preview_frame
-                settings = {"disparity_perc": disparity_perc, "preview_source": preview_source}
+                settings = {
+                    "disparity_perc": disparity_perc,
+                    "preview_source": preview_source,
+                    "dilate_x": float(dilate_x),
+                    "dilate_y": float(dilate_y),
+                    "blur_x": int(blur_x),
+                    "blur_y": int(blur_y),
+                    "dilate_left": float(dilate_left),
+                    "blur_left": int(blur_left),
+                    "blur_left_mix": float(blur_left_mix),
+                    "use_cuda": bool(use_cuda),
+                }
+                print(f" [GUI] Preview mode: {'CUDA' if use_cuda else 'CPU'}")
                 try:
                     img, total_frames = generate_preview_frame(video_info, settings, int(frame_idx))
                     return img, gr.update(maximum=max(total_frames - 1, 0))
@@ -627,27 +698,46 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                     print(f"Preview error: {e}")
                     return None, 0
 
+            _w_preview_inputs = [
+                w_video_list_state, w_video_dropdown, w_frame_slider, w_preview_source, w_disparity,
+                w_dilate_x, w_dilate_y, w_blur_x, w_blur_y, w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda
+            ]
+
             w_preview_btn.click(
                 fn=do_preview_warping,
-                inputs=[w_video_list_state, w_video_dropdown, w_frame_slider, w_preview_source, w_disparity],
+                inputs=_w_preview_inputs,
                 outputs=[w_preview_image, w_frame_slider]
             )
 
             # Auto-preview on param change
-            for _ctrl in [w_disparity, w_preview_source, w_frame_slider]:
+            for _ctrl in [w_disparity, w_preview_source, w_frame_slider,
+                          w_dilate_x, w_dilate_y, w_blur_x, w_blur_y,
+                          w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda]:
                 _ctrl.change(
                     fn=do_preview_warping,
-                    inputs=[w_video_list_state, w_video_dropdown, w_frame_slider, w_preview_source, w_disparity],
+                    inputs=_w_preview_inputs,
                     outputs=[w_preview_image, w_frame_slider]
                 )
 
             # Save/Load per-video settings
-            def save_video_settings_warping(video_list, selected_video, disparity_perc):
+            def save_video_settings_warping(video_list, selected_video, disparity_perc,
+                                            dilate_x, dilate_y, blur_x, blur_y,
+                                            dilate_left, blur_left, blur_left_mix, use_cuda):
                 if not video_list or not selected_video: return "No video selected."
                 video_info = next((v for v in video_list if v["base_name"] == selected_video), None)
                 if not video_info: return "Video not found."
                 
-                settings_to_save = {"disparity_perc": float(disparity_perc)}
+                settings_to_save = {
+                    "disparity_perc": float(disparity_perc),
+                    "dilate_x": float(dilate_x),
+                    "dilate_y": float(dilate_y),
+                    "blur_x": int(blur_x),
+                    "blur_y": int(blur_y),
+                    "dilate_left": float(dilate_left),
+                    "blur_left": int(blur_left),
+                    "blur_left_mix": float(blur_left_mix),
+                    "use_cuda": bool(use_cuda),
+                }
                 sidecar_path = os.path.splitext(video_info["video"])[0] + ".warpsettings.json"
                 with open(sidecar_path, "w") as f:
                     json.dump(settings_to_save, f, indent=2)
@@ -655,47 +745,65 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
 
             w_save_settings_btn.click(
                 fn=save_video_settings_warping,
-                inputs=[w_video_list_state, w_video_dropdown, w_disparity],
+                inputs=[w_video_list_state, w_video_dropdown, w_disparity,
+                        w_dilate_x, w_dilate_y, w_blur_x, w_blur_y,
+                        w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda],
                 outputs=[w_settings_status]
             )
 
             def load_video_settings_warping(video_list, selected_video):
-                if not video_list or not selected_video: return gr.update(), "No video selected."
+                if not video_list or not selected_video:
+                    return [gr.update()] * 9 + ["No video selected."]
                 video_info = next((v for v in video_list if v["base_name"] == selected_video), None)
-                if not video_info: return gr.update(), "Video not found."
+                if not video_info:
+                    return [gr.update()] * 9 + ["Video not found."]
                 
                 sidecar_path = os.path.splitext(video_info["video"])[0] + ".warpsettings.json"
                 if not os.path.exists(sidecar_path):
-                    return gr.update(), f"No saved settings found for {selected_video}"
+                    return [gr.update()] * 9 + [f"No saved settings found for {selected_video}"]
                 
                 try:
                     with open(sidecar_path, "r") as f:
                         s = json.load(f)
-                    return s.get("disparity_perc", gr.update()), f"✅ Loaded settings from {os.path.basename(sidecar_path)}"
+                    return [
+                        s.get("disparity_perc", gr.update()),
+                        s.get("dilate_x", gr.update()),
+                        s.get("dilate_y", gr.update()),
+                        s.get("blur_x", gr.update()),
+                        s.get("blur_y", gr.update()),
+                        s.get("dilate_left", gr.update()),
+                        s.get("blur_left", gr.update()),
+                        s.get("blur_left_mix", gr.update()),
+                        s.get("use_cuda", gr.update()),
+                        f"✅ Loaded settings from {os.path.basename(sidecar_path)}"
+                    ]
                 except Exception as e:
-                    return gr.update(), f"Error loading settings: {e}"
+                    return [gr.update()] * 9 + [f"Error loading settings: {e}"]
 
             w_load_settings_btn.click(
                 fn=load_video_settings_warping,
                 inputs=[w_video_list_state, w_video_dropdown],
-                outputs=[w_disparity, w_settings_status]
+                outputs=[w_disparity, w_dilate_x, w_dilate_y, w_blur_x, w_blur_y,
+                         w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_settings_status]
             )
 
             # Auto-preview & Load on video choice
             w_video_dropdown.change(
                 fn=load_video_settings_warping,
                 inputs=[w_video_list_state, w_video_dropdown],
-                outputs=[w_disparity, w_settings_status]
+                outputs=[w_disparity, w_dilate_x, w_dilate_y, w_blur_x, w_blur_y,
+                         w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_settings_status]
             ).then(
                 fn=do_preview_warping,
-                inputs=[w_video_list_state, w_video_dropdown, gr.State(0), w_preview_source, w_disparity],
+                inputs=[w_video_list_state, w_video_dropdown, gr.State(0), w_preview_source, w_disparity,
+                        w_dilate_x, w_dilate_y, w_blur_x, w_blur_y, w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda],
                 outputs=[w_preview_image, w_frame_slider]
             )
 
             def start_warping_flow(
                 input_f, depth_f, lefteye_f, hires_f, lowres_f,
                 disparity, high_batch, high_res, enable_low, low_batch, low_res,
-                reverse_out
+                reverse_out, use_cuda, *_depth_args
             ):
                 # 1. Validation
                 if not input_f or not os.path.isdir(input_f):
@@ -741,7 +849,8 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                 has_conflicts,
                 input_folder, depth_folder, left_eye_folder, high_res_folder, low_res_folder,
                 disparity_perc, high_batch, high_res, enable_low_res, low_batch, low_res,
-                reverse_output, conflict_policy="skip"
+                reverse_output, use_cuda, dilate_x=0.0, dilate_y=0.0, blur_x=0, blur_y=0,
+                dilate_left=0.0, blur_left=0, blur_left_mix=0.5, conflict_policy="skip"
             ):
                 if has_conflicts:
                     return
@@ -772,14 +881,18 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                 yield from process_warping(
                     input_folder, depth_folder, left_eye_folder, high_res_folder, low_res_folder,
                     disparity_perc, high_batch, high_res, enable_low_res, low_batch, low_res,
-                    reverse_output
+                    reverse_output, use_cuda,
+                    dilate_x=dilate_x, dilate_y=dilate_y, blur_x=blur_x, blur_y=blur_y,
+                    dilate_left=dilate_left, blur_left=blur_left, blur_left_mix=blur_left_mix
                 )
 
             # Define common inputs for warping batch
             _w_inputs = [
                 w_input_folder, w_depth_folder, w_lefteye_folder, w_hires_folder, w_lowres_folder,
                 w_disparity, w_high_batch, w_high_res, w_enable_low, w_low_batch, w_low_res,
-                w_reverse_out
+                w_reverse_out, w_use_cuda,
+                w_dilate_x, w_dilate_y, w_blur_x, w_blur_y,
+                w_dilate_left, w_blur_left, w_blur_left_mix
             ]
 
             w_btn.click(

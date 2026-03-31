@@ -14,10 +14,11 @@ _decord_loaded = False
 VideoReader = None
 cpu_ctx = None
 scatter_image = None
+preprocess_depth_frame = None
 
 
 def _ensure_imports():
-    global _decord_loaded, VideoReader, cpu_ctx, scatter_image
+    global _decord_loaded, VideoReader, cpu_ctx, scatter_image, preprocess_depth_frame
 
     if not _decord_loaded:
         from decord import VideoReader as VR, cpu
@@ -25,6 +26,8 @@ def _ensure_imports():
         cpu_ctx = cpu
         from m2svid.warping.warping import scatter_image as _si
         scatter_image = _si
+        from depth_preprocess import preprocess_depth_frame as _pdf
+        preprocess_depth_frame = _pdf
         _decord_loaded = True
 
 
@@ -72,6 +75,16 @@ def generate_preview_frame(video_info, settings, frame_index=0):
     """
     Generates a single warped preview frame from the given video info and settings.
     Returns a PIL Image and total_frames count.
+    
+    Settings dict can include:
+        disparity_perc: float
+        preview_source: str
+        dilate_x, dilate_y: float (depth dilation)
+        blur_x, blur_y: int (depth blur)
+        dilate_left: float (directional dilation)
+        blur_left: int (edge-aware blur)
+        blur_left_mix: float (H/V balance for blur_left)
+        use_cuda: bool (GPU-accelerated warping)
     """
     _ensure_imports()
 
@@ -79,6 +92,16 @@ def generate_preview_frame(video_info, settings, frame_index=0):
     depth_path = video_info["depth"]
     disparity_perc = float(settings.get("disparity_perc", 0.035))
     preview_source = settings.get("preview_source", "Reprojected Right")
+
+    # Depth preprocessing settings
+    dilate_x = float(settings.get("dilate_x", 0.0))
+    dilate_y = float(settings.get("dilate_y", 0.0))
+    blur_x = int(settings.get("blur_x", 0))
+    blur_y = int(settings.get("blur_y", 0))
+    dilate_left = float(settings.get("dilate_left", 0.0))
+    blur_left = int(settings.get("blur_left", 0))
+    blur_left_mix = float(settings.get("blur_left_mix", 0.5))
+    use_cuda = bool(settings.get("use_cuda", False))
 
     # Open readers
     video_reader = VideoReader(video_path, ctx=cpu_ctx(0))
@@ -100,14 +123,45 @@ def generate_preview_frame(video_info, settings, frame_index=0):
     if depth_gray.shape[0] != h or depth_gray.shape[1] != w:
         depth_gray = cv2.resize(depth_gray, (w, h), interpolation=cv2.INTER_CUBIC)
 
+    # Store raw depth for "Depth Map" preview
+    raw_depth_gray = depth_gray.copy()
+
+    # Apply depth preprocessing
+    depth_gray = preprocess_depth_frame(
+        depth_gray,
+        dilate_x=dilate_x,
+        dilate_y=dilate_y,
+        blur_x=blur_x,
+        blur_y=blur_y,
+        dilate_left=dilate_left,
+        blur_left=blur_left,
+        blur_left_mix=blur_left_mix,
+        use_cuda=use_cuda,
+    )
+
     # Calculate disparity scale
     disparity_scale = w * disparity_perc
 
-    # Warping
-    # scatter_image(input_frame, inverse_depth, direction, scale_factor, ...)
-    # direction=-1 means Right Eye reprojection (standard)
+    # Return early for depth-only previews (no warping needed)
+    if preview_source == "Depth Map (Raw)":
+        depth_vis = (np.clip(raw_depth_gray, 0, 1) * 255).astype(np.uint8)
+        final_frame = np.stack([depth_vis] * 3, axis=-1)
+        pil_img = Image.fromarray(final_frame)
+        del video_reader, depth_reader
+        gc.collect()
+        return pil_img, num_frames
+
+    if preview_source == "Depth Map (Processed)":
+        depth_vis = (np.clip(depth_gray, 0, 1) * 255).astype(np.uint8)
+        final_frame = np.stack([depth_vis] * 3, axis=-1)
+        pil_img = Image.fromarray(final_frame)
+        del video_reader, depth_reader
+        gc.collect()
+        return pil_img, num_frames
+
+    # Warping (using preprocessed depth)
     reproj_right, mask, _ = scatter_image(
-        video_np, depth_gray, direction=-1, scale_factor=disparity_scale, reproject_depth=False
+        video_np, depth_gray, direction=-1, scale_factor=disparity_scale, reproject_depth=False, use_cuda=use_cuda
     )
 
     # Assemble preview

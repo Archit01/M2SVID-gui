@@ -24,6 +24,7 @@ from pathlib import Path
 import ffmpeg
 import os
 import cv2
+from depth_preprocess import preprocess_depth_frame
 
 
 def process_video_with_depth(
@@ -38,6 +39,14 @@ def process_video_with_depth(
     max_frames=None,
     crf=14,
     bit_depth=10,
+    dilate_x=0.0,
+    dilate_y=0.0,
+    blur_x=0,
+    blur_y=0,
+    dilate_left=0.0,
+    blur_left=0,
+    blur_left_mix=0.5,
+    use_cuda=False,
 ):
     # Probe input video
     probe = ffmpeg.probe(video_path)
@@ -151,6 +160,20 @@ def process_video_with_depth(
             for d_frame in depth_batch
         ])
 
+        # Apply depth preprocessing if any parameters are set
+        for fi in range(len(depth_batch_resized)):
+            depth_batch_resized[fi] = preprocess_depth_frame(
+                depth_batch_resized[fi],
+                dilate_x=dilate_x,
+                dilate_y=dilate_y,
+                blur_x=blur_x,
+                blur_y=blur_y,
+                dilate_left=dilate_left,
+                blur_left=blur_left,
+                blur_left_mix=blur_left_mix,
+                use_cuda=use_cuda,
+            )
+
         disparities = depth_batch_resized * current_disparity_scale
 
         reprojected_right_videos = []
@@ -158,7 +181,7 @@ def process_video_with_depth(
 
         for left_frame, disparity in zip(left_frames, disparities):
             reprojected_image, inpainting_mask, _ = scatter_image(
-                left_frame, disparity, direction=-1, scale_factor=1, reproject_depth=True
+                left_frame, disparity, direction=-1, scale_factor=1, reproject_depth=True, use_cuda=use_cuda
             )
             reprojected_right_videos.append(reprojected_image)
             reprojected_right_masks.append(inpainting_mask)
@@ -238,6 +261,15 @@ if __name__ == "__main__":
     parser.add_argument("--crf", type=int, default=14, help="CRF value for the H264 10-bit output.")
     parser.add_argument("--bit_depth", type=int, default=10, help="Bit depth for the H264 output.")
     parser.add_argument("--batch_size", type=int, default=10, help="Processing sliding window / chunk size in frames.")
+    # Depth preprocessing arguments
+    parser.add_argument("--dilate_x", type=float, default=0.0, help="Depth dilation X (negative = erosion).")
+    parser.add_argument("--dilate_y", type=float, default=0.0, help="Depth dilation Y (negative = erosion).")
+    parser.add_argument("--blur_x", type=int, default=0, help="Depth blur kernel X.")
+    parser.add_argument("--blur_y", type=int, default=0, help="Depth blur kernel Y.")
+    parser.add_argument("--dilate_left", type=float, default=0.0, help="Directional left dilation.")
+    parser.add_argument("--blur_left", type=int, default=0, help="Edge-aware blur left.")
+    parser.add_argument("--blur_left_mix", type=float, default=0.5, help="H/V balance for blur_left (0=H, 1=V).")
+    parser.add_argument("--use_cuda", action="store_true", help="Use CuPy GPU-accelerated warping (falls back to NumPy if unavailable).")
 
     args = parser.parse_args()
 
@@ -258,4 +290,12 @@ if __name__ == "__main__":
         max_frames=args.max_frames,
         crf=args.crf,
         bit_depth=args.bit_depth,
+        dilate_x=args.dilate_x,
+        dilate_y=args.dilate_y,
+        blur_x=args.blur_x,
+        blur_y=args.blur_y,
+        dilate_left=args.dilate_left,
+        blur_left=args.blur_left,
+        blur_left_mix=args.blur_left_mix,
+        use_cuda=args.use_cuda,
     )

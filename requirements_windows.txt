@@ -220,3 +220,8 @@ wrapt==1.17.0
 # xformers is installed separately by install_windows.bat to ensure cu128 compatibility
 # xformers==0.0.33.post2
 yarl==1.18.0
+
+# ── GPU-accelerated warping (optional, falls back to NumPy if unavailable) ──
+# Using v13.6.0 (not v14) to maintain numpy 1.26.3 & kornia 0.6.9 compatibility
+cupy-cuda12x==13.6.0
+fastrlock==0.8.3

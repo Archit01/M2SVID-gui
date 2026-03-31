@@ -86,6 +86,34 @@ if %errorlevel% neq 0 (
 )
 
 echo.
+echo 9. Installing CuPy for GPU-accelerated warping...
+REM Install with --no-deps to prevent cupy from pulling in a CPU-only PyTorch
+"%PYTHON_EXE%" -m pip install --no-cache-dir --no-deps cupy-cuda12x==13.6.0
+if %errorlevel% neq 0 (
+    echo    WARNING: CuPy could not be installed.
+    echo    GPU-accelerated warping will be unavailable. NumPy fallback will be used.
+)
+
+echo.
+echo 10. Installing CuPy runtime dependency (fastrlock)...
+"%PYTHON_EXE%" -m pip install --no-cache-dir fastrlock==0.8.3
+if %errorlevel% neq 0 (
+    echo    WARNING: fastrlock install failed. CuPy may not work.
+)
+
+echo.
+echo 11. Re-verifying PyTorch CUDA installation...
+REM Re-pin PyTorch in case any dependency pulled a different version
+"%PYTHON_EXE%" -m pip install --no-cache-dir torch==2.9.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 2>nul
+
+echo.
+echo 12. Running post-install verification...
+"%PYTHON_EXE%" -c "import torch; print(f'  PyTorch: {torch.__version__}  CUDA available: {torch.cuda.is_available()}')"
+"%PYTHON_EXE%" -c "import numpy; print(f'  NumPy:   {numpy.__version__}')"
+REM CuPy JIT test: adds PyTorch lib dir so cupy can find CUDA 12 DLLs (cublas64_12, nvrtc64_120_0 etc.)
+"%PYTHON_EXE%" -c "import os, sys; tlib=os.path.join(sys.prefix,'Lib','site-packages','torch','lib'); os.add_dll_directory(tlib) if os.path.isdir(tlib) else None; import cupy as cp; a=cp.array([1.0,2.0,3.0]); print(f'  CuPy:    {cp.__version__}  GPU JIT test: OK (sum={float(cp.sum(a))})')" 2>nul || echo   CuPy:    Not available - warping will use NumPy CPU fallback.
+
+echo.
 echo =========================================================
 echo Installation complete! 
 echo.
@@ -93,6 +121,7 @@ echo Note:
 echo - Python is installed locally in the 'python_embed' folder!
 echo - No system-wide Python was touched or modified.
 echo - PyTorch 2.9.1 (CUDA 12.8) and matching xFormers 0.0.33.post2 are installed.
+echo - CuPy 13.6.0 installed for optional GPU-accelerated warping.
 echo.
 echo To run your app in the future, just use run_app.bat which handles everything automatically!
 echo =========================================================
