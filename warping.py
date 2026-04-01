@@ -110,7 +110,8 @@ def process_video_with_depth(
     frames_to_process = min(end_frame - start_frame, total_depth_frames - start_frame)
     start_sec = start_frame / fps if fps else 0.0
 
-    print(f"Processing frames {start_frame} to {start_frame + frames_to_process}...")
+    mode_str = "CUDA (GPU)" if use_cuda else "NumPy (CPU)"
+    print(f"Processing frames {start_frame} to {start_frame + frames_to_process} using {mode_str}...")
 
     if disparity_perc is not None:
         current_disparity_scale = int(width * disparity_perc)

@@ -223,7 +223,7 @@ def generate_preview_frame(video_info, settings, frame_index=0):
     if original_left.shape[2] != hires_H or original_left.shape[3] != hires_W:
         original_left = F.interpolate(
             original_left, size=(hires_H, hires_W), mode="bicubic", align_corners=False
-        )
+        ).clamp(0, 1)
 
     mask = torch.mean(mask_raw, dim=1, keepdim=True)
 
@@ -248,10 +248,10 @@ def generate_preview_frame(video_info, settings, frame_index=0):
                 else:
                     new_h = hires_H
                     new_w = int(round(hires_H * inpaint_aspect))
-                inpainted = F.interpolate(inpainted, size=(new_h, new_w), mode="bicubic", align_corners=False)
-                mask = F.interpolate(mask, size=(new_h, new_w), mode="bilinear", align_corners=False)
-            inpainted = F.interpolate(inpainted, size=(hires_H, hires_W), mode="bicubic", align_corners=False)
-            mask = F.interpolate(mask, size=(hires_H, hires_W), mode="bilinear", align_corners=False)
+                inpainted = F.interpolate(inpainted, size=(new_h, new_w), mode="bicubic", align_corners=False).clamp(0, 1)
+                mask = F.interpolate(mask, size=(new_h, new_w), mode="bicubic", align_corners=False).clamp(0, 1)
+            inpainted = F.interpolate(inpainted, size=(hires_H, hires_W), mode="bicubic", align_corners=False).clamp(0, 1)
+            mask = F.interpolate(mask, size=(hires_H, hires_W), mode="bicubic", align_corners=False).clamp(0, 1)
     
     
     
@@ -287,9 +287,9 @@ def generate_preview_frame(video_info, settings, frame_index=0):
     # Ensure inpainted and mask exactly match warped_original dimensions (resize, never crop)
     target_H, target_W = warped_original.shape[2], warped_original.shape[3]
     if inpainted.shape[2] != target_H or inpainted.shape[3] != target_W:
-        inpainted = F.interpolate(inpainted, size=(target_H, target_W), mode="bicubic", align_corners=False)
+        inpainted = F.interpolate(inpainted, size=(target_H, target_W), mode="bicubic", align_corners=False).clamp(0, 1)
     if processed_mask.shape[2] != target_H or processed_mask.shape[3] != target_W:
-        processed_mask = F.interpolate(processed_mask, size=(target_H, target_W), mode="bilinear", align_corners=False)
+        processed_mask = F.interpolate(processed_mask, size=(target_H, target_W), mode="bicubic", align_corners=False).clamp(0, 1)
 
     blended_right_eye = warped_original * (1 - processed_mask) + inpainted * processed_mask
 
@@ -313,8 +313,8 @@ def generate_preview_frame(video_info, settings, frame_index=0):
             new_H = int(round(H * zoom_factor))
             
             # Zoom both
-            original_left = F.interpolate(original_left, size=(new_H, new_W), mode="bicubic", align_corners=False)
-            blended_right_eye = F.interpolate(blended_right_eye, size=(new_H, new_W), mode="bicubic", align_corners=False)
+            original_left = F.interpolate(original_left, size=(new_H, new_W), mode="bicubic", align_corners=False).clamp(0, 1)
+            blended_right_eye = F.interpolate(blended_right_eye, size=(new_H, new_W), mode="bicubic", align_corners=False).clamp(0, 1)
             
             # Recalculate shifts for zoomed dimensions
             # Actually, simply cropping the center WxH and THEN shifting would lead to black bars again.
@@ -323,13 +323,13 @@ def generate_preview_frame(video_info, settings, frame_index=0):
             c_x, c_y = new_W // 2, new_H // 2
             half_w, half_h = W // 2, H // 2
             
-            # For right eye: center (c_x, c_y) + shift_r
-            start_x_r = c_x - half_w + shift_r
+            # For right eye: center (c_x, c_y) - shift_r
+            start_x_r = c_x - half_w - shift_r
             start_y_r = c_y - half_h
             blended_right_eye = blended_right_eye[:, :, start_y_r : start_y_r + H, start_x_r : start_x_r + W]
             
-            # For left eye: center (c_x, c_y) + shift_l
-            start_x_l = c_x - half_w + shift_l
+            # For left eye: center (c_x, c_y) - shift_l
+            start_x_l = c_x - half_w - shift_l
             start_y_l = c_y - half_h
             original_left = original_left[:, :, start_y_l : start_y_l + H, start_x_l : start_x_l + W]
             

@@ -132,31 +132,51 @@ fps = get_video_fps(args.video_path, ffmpeg.probe(args.video_path))
 reprojected_mask = apply_closing(reprojected_mask, reprojected_closing_holes_kernel)
 reprojected[reprojected_mask.repeat(1, 3, 1, 1) > 0.5] = 0
 reprojected_mask = apply_dilation(reprojected_mask, 3)
-reprojected_mask = reprojected_mask.repeat(1, 3, 1, 1)
+# reprojected_mask = reprojected_mask.repeat(1, 3, 1, 1)  # Keep as 1-channel to save RAM
 
 input_video = input_video.permute(1, 0, 2, 3)       # [c,t,h,w], uint8 0-255
 reprojected = reprojected.permute(1, 0, 2, 3)       # [c,t,h,w], uint8 0-255
 reprojected_mask = reprojected_mask.permute(1, 0, 2, 3)  # [c,t,h,w], uint8 0/1
 
-# Match dimensions
+# Match dimensions - Grid resolution is authoritative
 H_iv, W_iv = input_video.shape[2:]
 H_rp, W_rp = reprojected.shape[2:]
 
-if H_iv != H_rp or W_iv != W_rp:
-    target_H = max(H_iv, H_rp)
-    target_W = max(W_iv, W_rp)
-    if H_iv < target_H or W_iv < target_W:
-        input_video = F.pad(input_video, (0, target_W - W_iv, 0, target_H - H_iv), value=0)
-    if H_rp < target_H or W_rp < target_W:
-        reprojected = F.pad(reprojected, (0, target_W - W_rp, 0, target_H - H_rp), value=0)
-        reprojected_mask = F.pad(reprojected_mask, (0, target_W - W_rp, 0, target_H - H_rp), value=0)
+# Ensure Grid resolution is a multiple of 8 to avoid VAE size mismatch (e.g. 802 -> 800)
+target_H = (H_rp // 8) * 8
+target_W = (W_rp // 8) * 8
+
+# Resize reprojected and mask if they aren't multiples of 8 (required for VAE consistency)
+if H_rp != target_H or W_rp != target_W:
+    print(f"Warning: Grid resolution ({W_rp}x{H_rp}) is not a multiple of 8. Resizing to {target_W}x{target_H} to avoid model mismatch.")
+    reprojected = F.interpolate(reprojected.float(), size=(target_H, target_W), mode='bicubic', align_corners=False).to(reprojected.dtype).clamp(0, 255)
+    reprojected_mask = F.interpolate(reprojected_mask.float(), size=(target_H, target_W), mode='bicubic', align_corners=False).to(reprojected_mask.dtype).clamp(-1, 1)
+
+# Resize input_video to match target resolution exactly (no crops, irrespective of aspect ratio)
+if H_iv != target_H or W_iv != target_W:
+    input_video = F.interpolate(input_video.float(), size=(target_H, target_W), mode='bicubic', align_corners=False).to(input_video.dtype).clamp(0, 255)
 
 c, T, H, W = reprojected_mask.shape
 downsampled_resolution = [int(H / 8), int(W / 8)]
-reprojected_mask = reprojected_mask.permute(1, 0, 2, 3).float()  # [t,c,h,w]
-reprojected_mask = transforms.Resize(downsampled_resolution, antialias=mask_antialias)(reprojected_mask)
-reprojected_mask = reprojected_mask[:, [0]]
-reprojected_mask = reprojected_mask.permute(1, 0, 2, 3).half() * 2.0 - 1.0  # [c,t,h,w]
+
+# Perform resizing in chunks to avoid large float32 allocations (Peak RAM reduction)
+print(f"Resizing mask chunks for latent space ({T} frames)...")
+resized_masks = []
+chunk_size_resize = 100 
+for i in range(0, T, chunk_size_resize):
+    # Convert chunk to float for resizing, but keep channel count at 1
+    m_chunk = reprojected_mask[:, i:i+chunk_size_resize].permute(1, 0, 2, 3).float()
+    # Normalize/clamp to [0, 1] before resizing if needed, but here they are 0/1
+    m_chunk = transforms.Resize(
+        downsampled_resolution, 
+        interpolation=transforms.InterpolationMode.BICUBIC, 
+        antialias=mask_antialias
+    )(m_chunk).clamp(0, 1)
+    resized_masks.append(m_chunk.half()) # Store as half precision [0, 1]
+
+reprojected_mask = torch.cat(resized_masks, dim=0) # [T, 1, LH, LW]
+reprojected_mask = reprojected_mask.permute(1, 0, 2, 3) # [1, T, LH, LW]
+reprojected_mask = reprojected_mask * 2.0 - 1.0  # Scale to [-1, 1] for model input
 
 latent_H, latent_W = H // 8, W // 8
 

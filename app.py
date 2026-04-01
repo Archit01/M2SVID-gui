@@ -196,6 +196,7 @@ def process_warping(
                     active_dilate_left = s.get("dilate_left", dilate_left)
                     active_blur_left = s.get("blur_left", blur_left)
                     active_blur_left_mix = s.get("blur_left_mix", blur_left_mix)
+                    active_use_cuda = s.get("use_cuda", use_cuda)
             except Exception as e:
                 logger.error(f"Error loading sidecar for {filename}: {e}")
         else:
@@ -206,6 +207,7 @@ def process_warping(
             active_dilate_left = dilate_left
             active_blur_left = blur_left
             active_blur_left_mix = blur_left_mix
+            active_use_cuda = use_cuda
 
         # Conflict Check
         left_eye_out = os.path.join(left_eye_folder, f"{base_name}_lefteye.mp4")
@@ -280,7 +282,7 @@ def process_warping(
             "--blur_left", str(int(active_blur_left)),
             "--blur_left_mix", str(active_blur_left_mix),
         ]
-        if use_cuda:
+        if active_use_cuda:
             cmd_warp_high.append("--use_cuda")
         for sub_perc, desc in run_subprocess_with_progress(cmd_warp_high, env_vars, f"High Res Warping"):
             yield file_perc, sub_perc, f"File {i+1}/{total_files} | {filename} - {desc}", "Running"
@@ -307,7 +309,7 @@ def process_warping(
                 "--blur_left", str(int(active_blur_left)),
                 "--blur_left_mix", str(active_blur_left_mix),
             ]
-            if use_cuda:
+            if active_use_cuda:
                 cmd_warp_low.append("--use_cuda")
             for sub_perc, desc in run_subprocess_with_progress(cmd_warp_low, env_vars, f"Low Res Warping"):
                 yield file_perc, sub_perc, f"File {i+1}/{total_files} | {filename} - {desc}", "Running"
@@ -881,9 +883,10 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                 yield from process_warping(
                     input_folder, depth_folder, left_eye_folder, high_res_folder, low_res_folder,
                     disparity_perc, high_batch, high_res, enable_low_res, low_batch, low_res,
-                    reverse_output, use_cuda,
+                    reverse_output=reverse_output, conflict_policy=conflict_policy,
                     dilate_x=dilate_x, dilate_y=dilate_y, blur_x=blur_x, blur_y=blur_y,
-                    dilate_left=dilate_left, blur_left=blur_left, blur_left_mix=blur_left_mix
+                    dilate_left=dilate_left, blur_left=blur_left, blur_left_mix=blur_left_mix,
+                    use_cuda=use_cuda
                 )
 
             # Define common inputs for warping batch
@@ -1019,7 +1022,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                 yield from process_inpainting(
                     left_eye_folder, grid_folder, output_folder,
                     mask_antialias, tile_size, tile_overlap, chunk_size, overlap, blend_strength,
-                    model_variant
+                    model_variant, conflict_policy=conflict_policy
                 )
 
             # Define common inputs for inpainting batch

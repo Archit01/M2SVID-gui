@@ -148,10 +148,8 @@ def _scatter_numpy(
     y_coords, x_coords = black_pixel_indexes[:, 0], black_pixel_indexes[:, 1]
   mask[y_coords, x_coords] = 255
 
-  t_total = (time.perf_counter() - t0) * 1000
   _WARP_FRAME_COUNT_CPU += 1
-  if _WARP_FRAME_COUNT_CPU <= 20 or _WARP_FRAME_COUNT_CPU % 10 == 0:
-      print(f" [Warp] CPU Frame {_WARP_FRAME_COUNT_CPU}: {t_total:.2f}ms (Warping only)")
+  # Removed per-frame timing for cleaner logs
 
   return reproj_img.astype(input_frame.dtype), mask, reprojected_depth
 
@@ -275,15 +273,8 @@ def _scatter_cupy(
   res_mask = mask.get()
   res_depth = reprojected_depth.get() if reprojected_depth is not None else None
 
-  # Synchronize for accurate timing
-  torch.cuda.synchronize()
-  t_total = (time.perf_counter() - t0) * 1000
-  
   _WARP_FRAME_COUNT_GPU += 1
-  if _WARP_FRAME_COUNT_GPU <= 20 or _WARP_FRAME_COUNT_GPU % 10 == 0:
-      # Debug logging: Check if output is zero/black
-      img_mean = np.mean(res_img)
-      print(f" [Warp] GPU Frame {_WARP_FRAME_COUNT_GPU}: {t_total:.2f}ms (Warp Mean: {img_mean:.4f})")
+  # Removed per-frame timing for cleaner logs
 
   return res_img, res_mask, res_depth
 

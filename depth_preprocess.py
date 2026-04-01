@@ -307,7 +307,7 @@ def _custom_dilate_torch(depth_t, kx_raw, ky_raw):
     out = (1.0 - tx) * ((1.0 - ty) * r11 + ty * r12) + tx * ((1.0 - ty) * r21 + ty * r22)
     # Correct for padding mismatch if kernels were even (max_pool might shift)
     if out.shape != depth_t.shape:
-        out = torch.nn.functional.interpolate(out, size=(depth_t.shape[2], depth_t.shape[3]), mode='bilinear')
+        out = torch.nn.functional.interpolate(out, size=(depth_t.shape[2], depth_t.shape[3]), mode='bicubic', align_corners=False).clamp(0.0, 1.0)
     return torch.clamp(out, 0.0, 1.0)
 
 
@@ -454,40 +454,22 @@ def preprocess_depth_frame(
             t_orig = torch.from_numpy(depth_gray.copy()).to(device).float()
             depth_t = t_orig.unsqueeze(0).unsqueeze(0) # (1, 1, H, W)
             
-            def log_stats(label, t):
-                if _PREPROCESS_FRAME_COUNT_GPU == 0: # Only log first frame of session in detail
-                    print(f" [Debug] {label} - Mean: {t.mean().item():.4f}, Max: {t.max().item():.4f}")
-
-            log_stats("Input", depth_t)
-            
             # --- Applying steps on GPU ---
             if abs(float(dilate_left)) > 1e-5:
                 depth_t = _custom_dilate_left_torch(depth_t, float(dilate_left))
-                log_stats("Dilate Left", depth_t)
             
             if int(blur_left) > 0:
                 depth_t = _blur_left_edge_aware_torch(depth_t, int(blur_left), float(blur_left_mix))
-                log_stats("Blur Left", depth_t)
 
             if abs(float(dilate_x)) > 1e-5 or abs(float(dilate_y)) > 1e-5:
                 depth_t = _custom_dilate_torch(depth_t, float(dilate_x), float(dilate_y))
-                log_stats("Dilate X/Y", depth_t)
 
             if int(blur_x) > 0 or int(blur_y) > 0:
                 depth_t = _custom_blur_torch(depth_t, int(blur_x), int(blur_y))
-                log_stats("Blur X/Y", depth_t)
             
             # Back to NumPy - Explicit 2D slice is safer than squeeze()
             res = depth_t[0, 0].detach().cpu().numpy()
-            log_stats("Final Output", depth_t)
-            
-            t_total = (time.perf_counter() - t0) * 1000
-            
             _PREPROCESS_FRAME_COUNT_GPU += 1
-            if _PREPROCESS_FRAME_COUNT_GPU <= 20 or _PREPROCESS_FRAME_COUNT_GPU % 10 == 0:
-                # Debug logging: Check if output is zero/black
-                d_mean = np.mean(res)
-                print(f" [Preprocess] GPU Frame {_PREPROCESS_FRAME_COUNT_GPU}: {t_total:.2f}ms (Mean: {d_mean:.4f})")
             
             return res
         except Exception as f_err:
@@ -529,9 +511,6 @@ def preprocess_depth_frame(
     if has_blur:
         result = custom_blur(result, int(blur_x), int(blur_y))
 
-    t_total = (time.perf_counter() - t0) * 1000
     _PREPROCESS_FRAME_COUNT_CPU += 1
-    if _PREPROCESS_FRAME_COUNT_CPU <= 20 or _PREPROCESS_FRAME_COUNT_CPU % 10 == 0:
-        print(f" [Preprocess] CPU Frame {_PREPROCESS_FRAME_COUNT_CPU}: {t_total:.2f}ms")
 
     return result

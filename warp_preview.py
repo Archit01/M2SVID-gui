@@ -141,6 +141,11 @@ def generate_preview_frame(video_info, settings, frame_index=0):
 
     # Calculate disparity scale
     disparity_scale = w * disparity_perc
+    
+    # Mode indicator
+    mode_str = "CUDA (GPU)" if use_cuda else "NumPy (CPU)"
+    if frame_index == 0 or frame_index % 10 == 0: # Avoid spamming too much on slider move, but confirm on first load
+        print(f" [Warp Preview] Generating frame {frame_index} using {mode_str}...")
 
     # Return early for depth-only previews (no warping needed)
     if preview_source == "Depth Map (Raw)":
