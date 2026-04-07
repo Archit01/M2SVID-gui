@@ -102,6 +102,7 @@ def generate_preview_frame(video_info, settings, frame_index=0):
     blur_left = int(settings.get("blur_left", 0))
     blur_left_mix = float(settings.get("blur_left_mix", 0.5))
     use_cuda = bool(settings.get("use_cuda", False))
+    micro_hole_strength = float(settings.get("micro_hole_strength", 0.0))
 
     # Open readers
     video_reader = VideoReader(video_path, ctx=cpu_ctx(0))
@@ -166,7 +167,8 @@ def generate_preview_frame(video_info, settings, frame_index=0):
 
     # Warping (using preprocessed depth)
     reproj_right, mask, _ = scatter_image(
-        video_np, depth_gray, direction=-1, scale_factor=disparity_scale, reproject_depth=False, use_cuda=use_cuda
+        video_np, depth_gray, direction=-1, scale_factor=disparity_scale, reproject_depth=False, use_cuda=use_cuda,
+        close_micro_holes=(micro_hole_strength > 0), micro_hole_iters=micro_hole_strength
     )
 
     # Assemble preview

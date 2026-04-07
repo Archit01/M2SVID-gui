@@ -57,6 +57,8 @@ def _scatter_numpy(
     scale_factor: float,
     inverse_ordering: bool = False,
     reproject_depth: bool = False,
+    close_micro_holes: bool = False,
+    micro_hole_iters: float = 1.0,
 ):
   global _WARP_FRAME_COUNT_CPU
   import time
@@ -93,25 +95,66 @@ def _scatter_numpy(
     valid_x1 = valid_x1[::-1]
     reproj_valid_x_coords_plus1 = reproj_valid_x_coords_plus1[::-1]
 
+  depth_weight = np.power(1.414, disparity_map - disparity_map.min())
+
+  w0 = (1.0 - weight_for_plus1[valid_y, valid_x]) * depth_weight[valid_y, valid_x]
+  w1 = weight_for_plus1[valid_y1, valid_x1] * depth_weight[valid_y1, valid_x1]
+
   reproj_img[valid_y, reproj_valid_x_coords] += (
-      input_frame[valid_y, valid_x]
-      * (1.0 - weight_for_plus1[valid_y, valid_x])[:, None]
+      input_frame[valid_y, valid_x] * w0[:, None]
   )
-  reproj_img_weight[valid_y, reproj_valid_x_coords] += (
-      1.0 - weight_for_plus1[valid_y, valid_x]
-  )[:, None]
+  reproj_img_weight[valid_y, reproj_valid_x_coords] += w0[:, None]
+
   reproj_img[valid_y1, reproj_valid_x_coords_plus1] += (
-      input_frame[valid_y1, valid_x1]
-      * weight_for_plus1[valid_y1, valid_x1][:, None]
+      input_frame[valid_y1, valid_x1] * w1[:, None]
   )
-  reproj_img_weight[valid_y1, reproj_valid_x_coords_plus1] += weight_for_plus1[
-      valid_y1, valid_x1
-  ][:, None]
+  reproj_img_weight[valid_y1, reproj_valid_x_coords_plus1] += w1[:, None]
 
   filled_pixel_mask[(reproj_img_weight != 0)[:, :, 0]] = 1
   reproj_img[reproj_img_weight != 0] /= reproj_img_weight[
       reproj_img_weight != 0
   ]
+
+  if close_micro_holes:
+    import cv2
+    kernel = np.ones((3, 3), np.uint8)
+    mask_u8 = filled_pixel_mask.astype(np.uint8)
+    
+    iters_floor = int(np.floor(micro_hole_iters))
+    frac = float(micro_hole_iters - iters_floor)
+    total_iters = iters_floor + 1 if frac > 0 else iters_floor
+    
+    if iters_floor > 0:
+        closed_mask = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, kernel, iterations=iters_floor)
+        dilated_img = cv2.dilate(reproj_img, kernel, iterations=iters_floor)
+    else:
+        closed_mask = mask_u8.copy()
+        dilated_img = reproj_img.copy()
+
+    if frac > 0:
+        closed_mask_ceil = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, kernel, iterations=total_iters)
+        dilated_img_ceil = cv2.dilate(reproj_img, kernel, iterations=total_iters)
+        
+        new_holes = (closed_mask_ceil == 1) & (closed_mask == 0)
+        
+        bayer_4x4 = np.array([
+            [ 0,  8,  2, 10],
+            [12,  4, 14,  6],
+            [ 3, 11,  1,  9],
+            [15,  7, 13,  5]
+        ]) / 16.0
+        y_idx, x_idx = np.indices((h, w))
+        bayer_tile = bayer_4x4[y_idx % 4, x_idx % 4]
+        
+        frac_mask = new_holes & (bayer_tile < frac)
+        
+        closed_mask[frac_mask] = 1
+        dilated_img[frac_mask] = dilated_img_ceil[frac_mask]
+
+    holes_to_fill = (closed_mask == 1) & (~filled_pixel_mask)
+    if np.any(holes_to_fill):
+      reproj_img[holes_to_fill] = dilated_img[holes_to_fill]
+    filled_pixel_mask = closed_mask.astype(bool)
 
   if reproject_depth:
     depth = 1 / (inverse_depth + 1e-6)
@@ -161,6 +204,8 @@ def _scatter_cupy(
     scale_factor: float,
     inverse_ordering: bool = False,
     reproject_depth: bool = False,
+    close_micro_holes: bool = False,
+    micro_hole_iters: float = 1.0,
 ):
   h, w = input_frame.shape[:2]
   
@@ -217,28 +262,96 @@ def _scatter_cupy(
   valid_x1 = valid_x1[keep_idx1]
   reproj_valid_x_coords_plus1 = reproj_valid_x_coords_plus1[keep_idx1]
 
+  depth_weight = cp.power(1.414, disparity_map - disparity_map.min())
+
+  w0 = (1.0 - weight_for_plus1[valid_y, valid_x]) * depth_weight[valid_y, valid_x]
+  w1 = weight_for_plus1[valid_y1, valid_x1] * depth_weight[valid_y1, valid_x1]
+
   # Utilize += addition sequentially to ensure duplicate coordinate collision accumulation
   # identically matching original logic output.
   reproj_img[valid_y, reproj_valid_x_coords] += (
-      input_frame_cp[valid_y, valid_x]
-      * (1.0 - weight_for_plus1[valid_y, valid_x])[:, None]
+      input_frame_cp[valid_y, valid_x] * w0[:, None]
   )
-  reproj_img_weight[valid_y, reproj_valid_x_coords] += (
-      1.0 - weight_for_plus1[valid_y, valid_x]
-  )[:, None]
+  reproj_img_weight[valid_y, reproj_valid_x_coords] += w0[:, None]
+
   reproj_img[valid_y1, reproj_valid_x_coords_plus1] += (
-      input_frame_cp[valid_y1, valid_x1]
-      * weight_for_plus1[valid_y1, valid_x1][:, None]
+      input_frame_cp[valid_y1, valid_x1] * w1[:, None]
   )
-  reproj_img_weight[valid_y1, reproj_valid_x_coords_plus1] += weight_for_plus1[
-      valid_y1, valid_x1
-  ][:, None]
+  reproj_img_weight[valid_y1, reproj_valid_x_coords_plus1] += w1[:, None]
 
   filled_pixel_mask = cp.zeros((h, w)).astype(bool)
   filled_pixel_mask[(reproj_img_weight != 0)[:, :, 0]] = 1
 
   mask_weight_nz = reproj_img_weight != 0
   reproj_img[mask_weight_nz] /= reproj_img_weight[mask_weight_nz]
+
+  if close_micro_holes:
+    iters_floor = int(cp.floor(micro_hole_iters).get())
+    frac = float(micro_hole_iters - iters_floor)
+    total_iters = iters_floor + (1 if frac > 0 else 0)
+    
+    mask_float = filled_pixel_mask.astype(cp.float32)
+    dilated_mask = mask_float
+    for _ in range(iters_floor):
+      padded_mask = cp.pad(dilated_mask, pad_width=1, mode='edge')
+      shifts_dil = [padded_mask[i:i+h, j:j+w] for i in range(3) for j in range(3)]
+      dilated_mask = cp.max(cp.stack(shifts_dil, axis=-1), axis=-1)
+    
+    closed_mask = dilated_mask
+    for _ in range(iters_floor):
+      padded_dil = cp.pad(closed_mask, pad_width=1, mode='edge')
+      shifts_ero = [padded_dil[i:i+h, j:j+w] for i in range(3) for j in range(3)]
+      closed_mask = cp.min(cp.stack(shifts_ero, axis=-1), axis=-1)
+    closed_mask = closed_mask > 0.5
+    
+    dilated_img = reproj_img
+    for _ in range(iters_floor):
+      padded_img = cp.pad(dilated_img, pad_width=((1, 1), (1, 1), (0, 0)), mode='edge')
+      shifts_img = [padded_img[i:i+h, j:j+w, :] for i in range(3) for j in range(3)]
+      dilated_img = cp.max(cp.stack(shifts_img, axis=-1), axis=-1)
+
+    if frac > 0:
+      dilated_mask_ceil = mask_float
+      for _ in range(total_iters):
+        padded_mask = cp.pad(dilated_mask_ceil, pad_width=1, mode='edge')
+        shifts_dil = [padded_mask[i:i+h, j:j+w] for i in range(3) for j in range(3)]
+        dilated_mask_ceil = cp.max(cp.stack(shifts_dil, axis=-1), axis=-1)
+      
+      closed_mask_ceil = dilated_mask_ceil
+      for _ in range(total_iters):
+        padded_dil = cp.pad(closed_mask_ceil, pad_width=1, mode='edge')
+        shifts_ero = [padded_dil[i:i+h, j:j+w] for i in range(3) for j in range(3)]
+        closed_mask_ceil = cp.min(cp.stack(shifts_ero, axis=-1), axis=-1)
+      closed_mask_ceil = closed_mask_ceil > 0.5
+      
+      dilated_img_ceil = reproj_img
+      for _ in range(total_iters):
+        padded_img = cp.pad(dilated_img_ceil, pad_width=((1, 1), (1, 1), (0, 0)), mode='edge')
+        shifts_img = [padded_img[i:i+h, j:j+w, :] for i in range(3) for j in range(3)]
+        dilated_img_ceil = cp.max(cp.stack(shifts_img, axis=-1), axis=-1)
+
+      new_holes = closed_mask_ceil & (~closed_mask)
+      
+      bayer_4x4_cp = cp.array([
+          [ 0,  8,  2, 10],
+          [12,  4, 14,  6],
+          [ 3, 11,  1,  9],
+          [15,  7, 13,  5]
+      ]) / 16.0
+      y_idx, x_idx = cp.indices((h, w))
+      bayer_tile = bayer_4x4_cp[y_idx % 4, x_idx % 4]
+      
+      frac_mask = new_holes & (bayer_tile < frac)
+      closed_mask = closed_mask | frac_mask
+      
+      frac_mask_3c = cp.expand_dims(frac_mask, axis=-1)
+      dilated_img = cp.where(frac_mask_3c, dilated_img_ceil, dilated_img)
+
+    holes_to_fill = closed_mask & (~filled_pixel_mask)
+    filled_pixel_mask = closed_mask
+
+    if cp.any(holes_to_fill):
+      reproj_img[holes_to_fill] = dilated_img[holes_to_fill]
 
   if reproject_depth:
     depth = 1.0 / (inverse_depth_cp + 1e-6)
@@ -287,6 +400,8 @@ def scatter_image(
     inverse_ordering: bool = False,
     reproject_depth: bool = False,
     use_cuda: bool = False,
+    close_micro_holes: bool = False,
+    micro_hole_iters: float = 1.0,
 ):
   """Scatter-based image reprojection using depth.
 
@@ -316,6 +431,8 @@ def scatter_image(
           scale_factor,
           inverse_ordering,
           reproject_depth,
+          close_micro_holes,
+          micro_hole_iters,
       )
     except cp.cuda.memory.OutOfMemoryError:
       print(" [Warp] !! GPU Out of Memory !! Falling back to NumPy (CPU)...")
@@ -326,6 +443,8 @@ def scatter_image(
           scale_factor,
           inverse_ordering,
           reproject_depth,
+          close_micro_holes,
+          micro_hole_iters,
       )
   else:
     return _scatter_numpy(
@@ -335,4 +454,6 @@ def scatter_image(
         scale_factor,
         inverse_ordering,
         reproject_depth,
+        close_micro_holes,
+        micro_hole_iters,
     )
