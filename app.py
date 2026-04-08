@@ -20,22 +20,61 @@ logger = logging.getLogger(__name__)
 _settings_lock = threading.Lock()
 
 _M2SVID_BLOCKS_CSS = """
+/* Light Mode Defaults */
 body {
-    background: linear-gradient(135deg, #09090b 0%, #1e1b4b 100%) !important; 
-    color: #f8fafc !important;
+    background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%) !important; 
+    color: #0f172a !important;
 }
 .gradio-container {
     background: transparent !important;
 }
-/* Glassmorphism for panels */
+
+/* Base Panel Setup */
 .panel, .gradio-panel {
-    background: rgba(30, 41, 59, 0.5) !important;
-    backdrop-filter: blur(12px) !important;
-    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
     border-radius: 12px !important;
-    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3) !important;
+    position: relative;
+    z-index: 1;
 }
-/* Vibrant Primary Buttons */
+
+/* Glassmorphism layer (Light) */
+.panel::before, .gradio-panel::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(255, 255, 255, 0.6) !important;
+    backdrop-filter: blur(12px) !important;
+    border: 1px solid rgba(255, 255, 255, 0.5) !important;
+    border-radius: 12px !important;
+    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.1) !important;
+    z-index: -1;
+    pointer-events: none;
+}
+
+/* Fix stacking context for Dropdowns to pop over other panels */
+.panel:focus-within, .gradio-panel:focus-within {
+    z-index: 9999 !important;
+}
+
+/* Fix Dropdown Menu styling */
+ul.options, .options {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    border: 1px solid rgba(0, 0, 0, 0.1) !important;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2) !important;
+    border-radius: 8px !important;
+    z-index: 99999 !important;
+}
+ul.options li.selected, .options li.selected {
+    background: #f1f5f9 !important;
+}
+ul.options li:hover, .options li:hover {
+    background: #e2e8f0 !important;
+}
+
+/* Vibrant Primary Buttons (Shared) */
 button.primary {
     background: linear-gradient(90deg, #6366f1 0%, #a855f7 100%) !important;
     border: none !important;
@@ -47,7 +86,8 @@ button.primary:hover {
     transform: translateY(-2px) !important;
     box-shadow: 0 6px 20px rgba(99, 102, 241, 0.6) !important;
 }
-/* Enhanced tabs */
+
+/* Enhanced tabs (Shared) */
 .tabs > .tab-nav > button {
     font-weight: bold !important;
     font-size: 1.1em !important;
@@ -64,6 +104,55 @@ button.primary:hover {
     object-position: center center !important;
 }
 
+/* Animated Progress Bar Container (Light) */
+.progress-container {
+    background: rgba(255, 255, 255, 0.8);
+    border-radius: 12px;
+    height: 18px;
+    border: 1px solid rgba(0,0,0,0.1);
+    overflow: hidden;
+    box-shadow: inset 0px 4px 6px rgba(0,0,0,0.1);
+}
+
+.progress-text {
+    color: #0f172a;
+}
+
+/* Dark Mode Overrides */
+.dark body, body.dark {
+    background: linear-gradient(135deg, #09090b 0%, #1e1b4b 100%) !important; 
+    color: #f8fafc !important;
+}
+
+.dark .panel::before, .dark .gradio-panel::before, body.dark .panel::before, body.dark .gradio-panel::before {
+    background: rgba(30, 41, 59, 0.5) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3) !important;
+}
+
+.dark ul.options, body.dark ul.options, .dark .options, body.dark .options {
+    background: #1e293b !important;
+    color: #f8fafc !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5) !important;
+}
+.dark ul.options li.selected, body.dark ul.options li.selected, .dark .options li.selected, body.dark .options li.selected {
+    background: #334155 !important;
+}
+.dark ul.options li:hover, body.dark ul.options li:hover, .dark .options li:hover, body.dark .options li:hover {
+    background: #475569 !important;
+}
+
+.dark .progress-container, body.dark .progress-container {
+    background: rgba(30, 41, 59, 0.4);
+    border: 1px solid rgba(255,255,255,0.1);
+    box-shadow: inset 0px 4px 6px rgba(0,0,0,0.4);
+}
+
+.dark .progress-text, body.dark .progress-text {
+    color: #f8fafc;
+}
+
 /* Animated Progress Bar */
 @keyframes progress-shine {
     0% { transform: translateX(-100%); }
@@ -76,11 +165,11 @@ def make_progress_html(percentage, label):
     p = max(0, min(100, int(percentage)))
     return f"""
     <div style="margin-bottom: 15px; width: 100%;">
-        <div style="display: flex; justify-content: space-between; font-weight: bold; margin-bottom: 5px; color: #f8fafc; font-size: 0.95em;">
+        <div class="progress-text" style="display: flex; justify-content: space-between; font-weight: bold; margin-bottom: 5px; font-size: 0.95em;">
             <span>{label}</span>
             <span>{p}%</span>
         </div>
-        <div style="background: rgba(30, 41, 59, 0.4); border-radius: 12px; height: 18px; border: 1px solid rgba(255,255,255,0.1); overflow: hidden; box-shadow: inset 0px 4px 6px rgba(0,0,0,0.4);">
+        <div class="progress-container">
             <div style="width: {p}%; height: 100%; background: linear-gradient(90deg, #6366f1 0%, #a855f7 100%); transition: width 0.3s ease-out; position: relative;">
                 <div style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.3) 50%, rgba(255,255,255,0) 100%); animation: progress-shine 2s infinite linear;"></div>
             </div>
@@ -94,13 +183,20 @@ m2svid_theme = gr.themes.Base(
     neutral_hue="slate",
     font=[gr.themes.GoogleFont("Outfit"), "ui-sans-serif", "system-ui", "sans-serif"],
 ).set(
-    body_background_fill="*neutral_950",
-    body_text_color="*neutral_100",
-    background_fill_primary="rgba(0,0,0,0)",
-    background_fill_secondary="rgba(30,41,59,0.5)",
-    border_color_primary="*neutral_700",
-    block_background_fill="rgba(30,41,59,0.5)",
-    panel_background_fill="rgba(30,41,59,0.5)",
+    body_background_fill="*neutral_50",
+    body_background_fill_dark="*neutral_950",
+    body_text_color="*neutral_900",
+    body_text_color_dark="*neutral_100",
+    background_fill_primary="white",
+    background_fill_primary_dark="rgba(0,0,0,0)",
+    background_fill_secondary="*neutral_50",
+    background_fill_secondary_dark="rgba(30,41,59,0.5)",
+    border_color_primary="*neutral_200",
+    border_color_primary_dark="*neutral_700",
+    block_background_fill="rgba(255,255,255,0.6)",
+    block_background_fill_dark="rgba(30,41,59,0.5)",
+    panel_background_fill="rgba(255,255,255,0.6)",
+    panel_background_fill_dark="rgba(30,41,59,0.5)",
     button_primary_text_color="white",
     slider_color="*primary_500",
 )
