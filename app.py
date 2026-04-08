@@ -9,11 +9,297 @@ import json
 import sys
 import platform
 import logging
+import tempfile
+import threading
 
 
 # Set up logging for cleaner debugging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+_settings_lock = threading.Lock()
+
+_M2SVID_BLOCKS_CSS = """
+body {
+    background: linear-gradient(135deg, #09090b 0%, #1e1b4b 100%) !important; 
+    color: #f8fafc !important;
+}
+.gradio-container {
+    background: transparent !important;
+}
+/* Glassmorphism for panels */
+.panel, .gradio-panel {
+    background: rgba(30, 41, 59, 0.5) !important;
+    backdrop-filter: blur(12px) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    border-radius: 12px !important;
+    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3) !important;
+}
+/* Vibrant Primary Buttons */
+button.primary {
+    background: linear-gradient(90deg, #6366f1 0%, #a855f7 100%) !important;
+    border: none !important;
+    box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4) !important;
+    transition: transform 0.2s, box-shadow 0.2s !important;
+    color: white !important;
+}
+button.primary:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: 0 6px 20px rgba(99, 102, 241, 0.6) !important;
+}
+/* Enhanced tabs */
+.tabs > .tab-nav > button {
+    font-weight: bold !important;
+    font-size: 1.1em !important;
+}
+.tabs > .tab-nav > button.selected {
+    color: #a855f7 !important;
+    border-bottom: 3px solid #a855f7 !important;
+}
+#m2svid-warp-preview img,
+.m2svid-warp-preview-root img {
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: contain !important;
+    object-position: center center !important;
+}
+
+/* Animated Progress Bar */
+@keyframes progress-shine {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+"""
+
+def make_progress_html(percentage, label):
+    # Ensure percentage is bound between 0 and 100 for safety
+    p = max(0, min(100, int(percentage)))
+    return f"""
+    <div style="margin-bottom: 15px; width: 100%;">
+        <div style="display: flex; justify-content: space-between; font-weight: bold; margin-bottom: 5px; color: #f8fafc; font-size: 0.95em;">
+            <span>{label}</span>
+            <span>{p}%</span>
+        </div>
+        <div style="background: rgba(30, 41, 59, 0.4); border-radius: 12px; height: 18px; border: 1px solid rgba(255,255,255,0.1); overflow: hidden; box-shadow: inset 0px 4px 6px rgba(0,0,0,0.4);">
+            <div style="width: {p}%; height: 100%; background: linear-gradient(90deg, #6366f1 0%, #a855f7 100%); transition: width 0.3s ease-out; position: relative;">
+                <div style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.3) 50%, rgba(255,255,255,0) 100%); animation: progress-shine 2s infinite linear;"></div>
+            </div>
+        </div>
+    </div>
+    """
+
+m2svid_theme = gr.themes.Base(
+    primary_hue="purple",
+    secondary_hue="indigo",
+    neutral_hue="slate",
+    font=[gr.themes.GoogleFont("Outfit"), "ui-sans-serif", "system-ui", "sans-serif"],
+).set(
+    body_background_fill="*neutral_950",
+    body_text_color="*neutral_100",
+    background_fill_primary="rgba(0,0,0,0)",
+    background_fill_secondary="rgba(30,41,59,0.5)",
+    border_color_primary="*neutral_700",
+    block_background_fill="rgba(30,41,59,0.5)",
+    panel_background_fill="rgba(30,41,59,0.5)",
+    button_primary_text_color="white",
+    slider_color="*primary_500",
+)
+
+def _gui_settings_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "m2svid_gui_settings.json")
+
+GUI_SETTINGS_VERSION = 1
+
+def default_gui_settings():
+    return {
+        "version": GUI_SETTINGS_VERSION,
+        "warping": {
+            "input_folder": "demo/input",
+            "depth_folder": "demo/depth",
+            "disparity": 0.035,
+            "lefteye_folder": "demo/lefteye",
+            "hires_folder": "demo/warped_high",
+            "lowres_folder": "demo/warped_low",
+            "high_batch": 10,
+            "high_res": "1920x1024",
+            "enable_low": True,
+            "reverse_out": False,
+            "low_batch": 10,
+            "low_res": "1280x704",
+            "use_cuda": False,
+            "micro_hole_strength": 0.0,
+            "dilate_x": 0.0,
+            "dilate_y": 0.0,
+            "blur_x": 0,
+            "blur_y": 0,
+            "dilate_left": 0.0,
+            "blur_left": 0,
+            "blur_left_mix": 0.5,
+            "preview_source": "Reprojected Right",
+            "frame_slider": 0,
+        },
+        "inpainting": {
+            "lefteye_folder": "demo/lefteye",
+            "grid_folder": "demo/warped_low",
+            "output_folder": "demo/refine_output",
+            "model_variant": "Option 1: Full Attention",
+            "mask_antialias": 0,
+            "tile_size": 256,
+            "tile_overlap": 32,
+            "chunk_size": 25,
+            "overlap": 3,
+            "original_input_blend_strength": 0.0,
+        },
+        "merging": {
+            "inpainted_folder": "demo/refine_output",
+            "original_folder": "demo/input",
+            "mask_folder": "demo/warped_high",
+            "output_folder": "demo/merged_output",
+            "output_format": "Full SBS (Left-Right)",
+            "use_gpu": True,
+            "color_transfer": True,
+            "undo_reverse": False,
+            "batch_chunk_size": 10,
+            "convergence": 35,
+            "convergence_mode": "Auto-Zoom",
+            "codec": "H.265",
+            "output_crf": 14,
+            "mask_bin_thresh": 0.0,
+            "mask_dilate": 13,
+            "mask_blur": 3,
+            "shadow_shift": 40,
+            "shadow_start_op": 0.4,
+            "shadow_decay": 0.4,
+            "shadow_min_op": 0.4,
+            "shadow_gamma": 1.0,
+            "preview_source": "Blended Right Eye",
+            "frame_slider": 0,
+        },
+    }
+
+def load_gui_settings_merged():
+    base = default_gui_settings()
+    path = _gui_settings_path()
+    if not os.path.isfile(path):
+        return base
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            disk = json.load(f)
+    except Exception as e:
+        logger.warning(f"Could not read GUI settings ({path}): {e}")
+        return base
+    if not isinstance(disk, dict):
+        return base
+    for section in ("warping", "inpainting", "merging"):
+        if section in disk and isinstance(disk[section], dict):
+            base[section].update(disk[section])
+    return base
+
+def save_gui_settings_file(settings_dict):
+    path = _gui_settings_path()
+    payload = dict(settings_dict)
+    payload["version"] = GUI_SETTINGS_VERSION
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(suffix=".json", dir=d, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        with _settings_lock:
+            os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def pack_gui_settings_dict(args_tuple):
+    (
+        w_input_folder, w_depth_folder, w_disparity, w_lefteye_folder, w_hires_folder, w_lowres_folder,
+        w_high_batch, w_high_res, w_enable_low, w_reverse_out, w_low_batch, w_low_res, w_use_cuda, w_micro_hole_strength,
+        w_dilate_x, w_dilate_y, w_blur_x, w_blur_y, w_dilate_left, w_blur_left, w_blur_left_mix,
+        w_preview_source, w_frame_slider,
+        i_lefteye_folder, i_grid_folder, i_output_folder,
+        i_model_variant, i_mask_antialias, i_tile_size, i_tile_overlap, i_chunk_size, i_overlap, i_original_input_blend_strength,
+        m_inpainted_folder, m_original_folder, m_mask_folder, m_output_folder,
+        m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse, m_batch_chunk_size, m_convergence, m_convergence_mode,
+        m_codec, m_output_crf,
+        m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+        m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
+        m_preview_source, m_frame_slider,
+    ) = args_tuple
+    return {
+        "version": GUI_SETTINGS_VERSION,
+        "warping": {
+            "input_folder": w_input_folder,
+            "depth_folder": w_depth_folder,
+            "disparity": w_disparity,
+            "lefteye_folder": w_lefteye_folder,
+            "hires_folder": w_hires_folder,
+            "lowres_folder": w_lowres_folder,
+            "high_batch": w_high_batch,
+            "high_res": w_high_res,
+            "enable_low": w_enable_low,
+            "reverse_out": w_reverse_out,
+            "low_batch": w_low_batch,
+            "low_res": w_low_res,
+            "use_cuda": w_use_cuda,
+            "micro_hole_strength": w_micro_hole_strength,
+            "dilate_x": w_dilate_x,
+            "dilate_y": w_dilate_y,
+            "blur_x": w_blur_x,
+            "blur_y": w_blur_y,
+            "dilate_left": w_dilate_left,
+            "blur_left": w_blur_left,
+            "blur_left_mix": w_blur_left_mix,
+            "preview_source": w_preview_source,
+            "frame_slider": w_frame_slider,
+        },
+        "inpainting": {
+            "lefteye_folder": i_lefteye_folder,
+            "grid_folder": i_grid_folder,
+            "output_folder": i_output_folder,
+            "model_variant": i_model_variant,
+            "mask_antialias": i_mask_antialias,
+            "tile_size": i_tile_size,
+            "tile_overlap": i_tile_overlap,
+            "chunk_size": i_chunk_size,
+            "overlap": i_overlap,
+            "original_input_blend_strength": i_original_input_blend_strength,
+        },
+        "merging": {
+            "inpainted_folder": m_inpainted_folder,
+            "original_folder": m_original_folder,
+            "mask_folder": m_mask_folder,
+            "output_folder": m_output_folder,
+            "output_format": m_output_format,
+            "use_gpu": m_use_gpu,
+            "color_transfer": m_color_transfer,
+            "undo_reverse": m_undo_reverse,
+            "batch_chunk_size": m_batch_chunk_size,
+            "convergence": m_convergence,
+            "convergence_mode": m_convergence_mode,
+            "codec": m_codec,
+            "output_crf": m_output_crf,
+            "mask_bin_thresh": m_mask_bin_thresh,
+            "mask_dilate": m_mask_dilate,
+            "mask_blur": m_mask_blur,
+            "shadow_shift": m_shadow_shift,
+            "shadow_start_op": m_shadow_start_op,
+            "shadow_decay": m_shadow_decay,
+            "shadow_min_op": m_shadow_min_op,
+            "shadow_gamma": m_shadow_gamma,
+            "preview_source": m_preview_source,
+            "frame_slider": m_frame_slider,
+        },
+    }
+
+def persist_gui_settings_bundle(*args):
+    try:
+        save_gui_settings_file(pack_gui_settings_dict(args))
+    except Exception as e:
+        logger.warning(f"Could not save GUI settings: {e}")
 
 def check_file_conflicts(files, target_folders, suffixes):
     """Checks if any proposed output files already exist."""
@@ -542,7 +828,7 @@ def process_merging(
         
     yield 100, 100, "All files processed.", "Merging Section Processing Complete!"
 
-with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_CSS) as demo:
     gr.Markdown("# M2SVID Pipeline Processing")
     
     # ---- State for scanned warping video list ----
@@ -552,7 +838,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
         with gr.Tab("Section 1: Warping"):
             gr.Markdown("Warp videos using depth maps with optional low-res generation for inpainting.")
             with gr.Row():
-                with gr.Column():
+                with gr.Column(variant="panel"):
                     with gr.Row():
                         w_input_folder = gr.Textbox(label="Input Video Folder (Left Eyes: filename.mp4)", value="demo/input", scale=4)
                         w_input_btn = gr.Button("Browse", scale=1)
@@ -560,7 +846,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                         w_depth_folder = gr.Textbox(label="Depth Map Folder (filename_depth.mp4)", value="demo/depth", scale=4)
                         w_depth_btn = gr.Button("Browse", scale=1)
                     w_disparity = gr.Slider(minimum=0.000, maximum=0.100, value=0.035, step=0.001, label="Disparity Percentage")
-                with gr.Column():
+                with gr.Column(variant="panel"):
                     with gr.Row():
                         w_lefteye_folder = gr.Textbox(label="Output: Left Eye Folder (For Downscaled versions)", value="demo/lefteye", scale=4)
                         w_lefteye_btn = gr.Button("Browse", scale=1)
@@ -611,12 +897,12 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
             
             with gr.Row():
                 w_scan_btn = gr.Button("🔍 Scan Videos", variant="secondary")
-                w_video_dropdown = gr.Dropdown(label="Select Video", choices=[], interactive=True, scale=3)
+                w_video_dropdown = gr.Dropdown(label="Select Video", choices=[], interactive=True, scale=3, allow_custom_value=True)
                 w_video_info = gr.Textbox(label="Video Info", interactive=False, scale=2)
             
             with gr.Row():
                 with gr.Column(scale=3):
-                    w_preview_image = gr.Image(label="Preview", type="pil", height=480)
+                    w_preview_image = gr.Image(label="Preview", type="pil", height=480, elem_id="m2svid-warp-preview", elem_classes=["m2svid-warp-preview-root"])
                 with gr.Column(scale=1):
                     w_preview_source = gr.Dropdown(
                         label="Preview Source",
@@ -635,8 +921,8 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
 
             gr.Markdown("---")
             with gr.Row():
-                w_file_prog = gr.Slider(minimum=0, maximum=100, step=1, label="Overall File Progress (%)", interactive=False)
-                w_sub_prog = gr.Slider(minimum=0, maximum=100, step=1, label="Current Stage Progress (%)", interactive=False)
+                w_file_prog = gr.HTML(value=make_progress_html(0, "Overall File Progress (%)"))
+                w_sub_prog = gr.HTML(value=make_progress_html(0, "Current Stage Progress (%)"))
                 
             w_prog_text = gr.Textbox(label="Progress Details", interactive=False)
             w_btn = gr.Button("Start Batch Warping", variant="primary")
@@ -890,14 +1176,15 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                                 os.remove(path)
 
                 # Call the original processing function
-                yield from process_warping(
+                for f_perc, s_perc, p_text, p_stat in process_warping(
                     input_folder, depth_folder, left_eye_folder, high_res_folder, low_res_folder,
                     disparity_perc, high_batch, high_res, enable_low_res, low_batch, low_res,
                     reverse_output=reverse_output, conflict_policy=conflict_policy,
                     dilate_x=dilate_x, dilate_y=dilate_y, blur_x=blur_x, blur_y=blur_y,
                     dilate_left=dilate_left, blur_left=blur_left, blur_left_mix=blur_left_mix,
                     use_cuda=use_cuda, micro_hole_strength=micro_hole_strength
-                )
+                ):
+                    yield make_progress_html(f_perc, "Overall File Progress (%)"), make_progress_html(s_perc, "Current Stage Progress (%)"), p_text, p_stat
 
             # Define common inputs for warping batch
             _w_inputs = [
@@ -915,19 +1202,22 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
             ).then(
                 fn=run_warping_batch,
                 inputs=[w_has_conflicts] + _w_inputs,
-                outputs=[w_file_prog, w_sub_prog, w_prog_text, w_output]
+                outputs=[w_file_prog, w_sub_prog, w_prog_text, w_output],
+                show_progress="hidden"
             )
 
             w_skip_btn.click(
                 fn=run_warping_batch,
                 inputs=[gr.State(False)] + _w_inputs + [gr.State("skip")],
-                outputs=[w_file_prog, w_sub_prog, w_prog_text, w_output]
+                outputs=[w_file_prog, w_sub_prog, w_prog_text, w_output],
+                show_progress="hidden"
             ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [w_conflict_group, w_btn])
 
             w_overwrite_btn.click(
                 fn=run_warping_batch,
                 inputs=[gr.State(False)] + _w_inputs + [gr.State("overwrite")],
-                outputs=[w_file_prog, w_sub_prog, w_prog_text, w_output]
+                outputs=[w_file_prog, w_sub_prog, w_prog_text, w_output],
+                show_progress="hidden"
             ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [w_conflict_group, w_btn])
             
             w_cancel_btn.click(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [w_conflict_group, w_btn])
@@ -935,7 +1225,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
         with gr.Tab("Section 2: Inpainting and Refine"):
             gr.Markdown("Inpaint right eyes using downscaled Left Eye and Grid Video chunks.")
             with gr.Row():
-                with gr.Column():
+                with gr.Column(variant="panel"):
                     with gr.Row():
                         i_lefteye_folder = gr.Textbox(label="Input: Left Eye Folder (filename_lefteye.mp4)", value="demo/lefteye", scale=4)
                         i_lefteye_btn = gr.Button("Browse", scale=1)
@@ -945,7 +1235,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                     with gr.Row():
                         i_output_folder = gr.Textbox(label="Output: Final Right Eye Folder", value="demo/refine_output", scale=4)
                         i_output_btn = gr.Button("Browse", scale=1)
-                with gr.Column():
+                with gr.Column(variant="panel"):
                     i_model_variant = gr.Radio(
                         label="Model Variant", 
                         choices=["Option 1: Full Attention", "Option 2: Without Full Attention"], 
@@ -959,9 +1249,9 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                     i_original_input_blend_strength = gr.Number(label="Original Input Blend Strength (Context)", value=0.0, step=0.1)
                     
             with gr.Row():
-                i_file_prog = gr.Slider(minimum=0, maximum=100, step=1, label="Overall File Progress (%)", interactive=False)
-                i_temp_prog = gr.Slider(minimum=0, maximum=100, step=1, label="Temporal Chunks Progress (%)", interactive=False)
-                i_spat_prog = gr.Slider(minimum=0, maximum=100, step=1, label="Spatial Tiles Progress (%)", interactive=False)
+                i_file_prog = gr.HTML(value=make_progress_html(0, "Overall File Progress (%)"))
+                i_temp_prog = gr.HTML(value=make_progress_html(0, "Temporal Chunks Progress (%)"))
+                i_spat_prog = gr.HTML(value=make_progress_html(0, "Spatial Tiles Progress (%)"))
                 
             i_prog_text = gr.Textbox(label="Progress Details", interactive=False)
             i_btn = gr.Button("Start Batch Inpainting", variant="primary")
@@ -1029,11 +1319,12 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                         for existing in glob.glob(pattern):
                             os.remove(existing)
                             
-                yield from process_inpainting(
+                for f_perc, t_perc, s_perc, p_text, p_stat in process_inpainting(
                     left_eye_folder, grid_folder, output_folder,
                     mask_antialias, tile_size, tile_overlap, chunk_size, overlap, blend_strength,
                     model_variant, conflict_policy=conflict_policy
-                )
+                ):
+                    yield make_progress_html(f_perc, "Overall File Progress (%)"), make_progress_html(t_perc, "Temporal Chunks Progress (%)"), make_progress_html(s_perc, "Spatial Tiles Progress (%)"), p_text, p_stat
 
             # Define common inputs for inpainting batch
             _i_inputs = [
@@ -1049,19 +1340,22 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
             ).then(
                 fn=run_inpainting_batch,
                 inputs=[i_has_conflicts] + _i_inputs,
-                outputs=[i_file_prog, i_temp_prog, i_spat_prog, i_prog_text, i_output]
+                outputs=[i_file_prog, i_temp_prog, i_spat_prog, i_prog_text, i_output],
+                show_progress="hidden"
             )
 
             i_skip_btn.click(
                 fn=run_inpainting_batch,
                 inputs=[gr.State(False)] + _i_inputs + [gr.State("skip")],
-                outputs=[i_file_prog, i_temp_prog, i_spat_prog, i_prog_text, i_output]
+                outputs=[i_file_prog, i_temp_prog, i_spat_prog, i_prog_text, i_output],
+                show_progress="hidden"
             ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [i_conflict_group, i_btn])
 
             i_overwrite_btn.click(
                 fn=run_inpainting_batch,
                 inputs=[gr.State(False)] + _i_inputs + [gr.State("overwrite")],
-                outputs=[i_file_prog, i_temp_prog, i_spat_prog, i_prog_text, i_output]
+                outputs=[i_file_prog, i_temp_prog, i_spat_prog, i_prog_text, i_output],
+                show_progress="hidden"
             ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [i_conflict_group, i_btn])
             
             i_cancel_btn.click(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [i_conflict_group, i_btn])
@@ -1073,7 +1367,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
             m_video_list_state = gr.State([])
             
             with gr.Row():
-                with gr.Column():
+                with gr.Column(variant="panel"):
                     with gr.Row():
                         m_inpainted_folder = gr.Textbox(label="Input: Inpainted Video Folder", value="demo/refine_output", scale=4)
                         m_inpainted_btn = gr.Button("Browse", scale=1)
@@ -1087,7 +1381,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
                         m_output_folder = gr.Textbox(label="Output: Final Merged Video Folder", value="demo/merged_output", scale=4)
                         m_output_btn = gr.Button("Browse", scale=1)
                         
-                with gr.Column():
+                with gr.Column(variant="panel"):
                     gr.Markdown("### Processing Options")
                     m_output_format = gr.Dropdown(
                         label="Output Format",
@@ -1118,7 +1412,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
             with gr.Row():
                 with gr.Column(variant="panel"):
                     gr.Markdown("### Mask Processing & Thresholding")
-                    m_mask_bin_thresh = gr.Slider(minimum=-1.0, maximum=1.0, step=0.01, label="Mask Binarize Threshold (-1 = disabled)", value=-1.0)
+                    m_mask_bin_thresh = gr.Slider(minimum=-1.0, maximum=1.0, step=0.01, label="Mask Binarize Threshold (-1 = disabled)", value=0.0)
                     m_mask_dilate = gr.Slider(minimum=0, maximum=50, step=1, label="Mask Dilate Kernel", value=13)
                     m_mask_blur = gr.Slider(minimum=0, maximum=50, step=1, label="Mask Blur Kernel", value=3)
                 with gr.Column(variant="panel"):
@@ -1134,12 +1428,12 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
             
             with gr.Row():
                 m_scan_btn = gr.Button("🔍 Scan Videos", variant="secondary")
-                m_video_dropdown = gr.Dropdown(label="Select Video", choices=[], interactive=True, scale=3)
+                m_video_dropdown = gr.Dropdown(label="Select Video", choices=[], interactive=True, scale=3, allow_custom_value=True)
                 m_video_info = gr.Textbox(label="Video Info", interactive=False, scale=2)
             
             with gr.Row():
                 with gr.Column(scale=3):
-                    m_preview_image = gr.Image(label="Preview", type="pil", height=480)
+                    m_preview_image = gr.Image(label="Preview", type="pil", height=480, elem_id="m2svid-warp-preview", elem_classes=["m2svid-warp-preview-root"])
                 with gr.Column(scale=1):
                     m_preview_source = gr.Dropdown(
                         label="Preview Source",
@@ -1158,8 +1452,8 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
 
             gr.Markdown("---")
             with gr.Row():
-                m_file_prog = gr.Slider(minimum=0, maximum=100, step=1, label="Overall File Progress (%)", interactive=False)
-                m_sub_prog = gr.Slider(minimum=0, maximum=100, step=1, label="Video Rendering Progress (%)", interactive=False)
+                m_file_prog = gr.HTML(value=make_progress_html(0, "Overall File Progress (%)"))
+                m_sub_prog = gr.HTML(value=make_progress_html(0, "Video Rendering Progress (%)"))
                 
             m_prog_text = gr.Textbox(label="Progress Details", interactive=False)
             m_btn = gr.Button("🚀 Start Batch Merging", variant="primary")
@@ -1495,31 +1789,78 @@ with gr.Blocks(title="M2SVID Pipeline", theme=gr.themes.Soft()) as demo:
             ]
             _m_outputs = [m_file_prog, m_sub_prog, m_prog_text, m_output]
 
+            def process_merging_ui(*args, **kwargs):
+                for f_perc, s_perc, text, stat in process_merging(*args, **kwargs):
+                    yield make_progress_html(f_perc, "Overall File Progress (%)"), make_progress_html(s_perc, "Video Rendering Progress (%)"), text, stat
+
             m_btn.click(
                 fn=start_merging_flow,
                 inputs=_m_inputs,
                 outputs=[m_conflict_group, m_conflict_msg, m_btn, m_has_conflicts]
             ).then(
-                fn=process_merging,
+                fn=process_merging_ui,
                 inputs=[m_has_conflicts] + _m_inputs,
-                outputs=_m_outputs
+                outputs=_m_outputs,
+                show_progress="hidden"
             )
 
             m_skip_btn.click(
-                fn=process_merging,
+                fn=process_merging_ui,
                 inputs=[gr.State(False)] + _m_inputs + [gr.State("skip")],
-                outputs=_m_outputs
+                outputs=_m_outputs,
+                show_progress="hidden"
             ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [m_conflict_group, m_btn])
 
             m_overwrite_btn.click(
-                fn=process_merging,
+                fn=process_merging_ui,
                 inputs=[gr.State(False)] + _m_inputs + [gr.State("overwrite")],
-                outputs=_m_outputs
+                outputs=_m_outputs,
+                show_progress="hidden"
             ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [m_conflict_group, m_btn])
             
             m_cancel_btn.click(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [m_conflict_group, m_btn])
 
+    _gui_persist_inputs = [
+        w_input_folder, w_depth_folder, w_disparity, w_lefteye_folder, w_hires_folder, w_lowres_folder,
+        w_high_batch, w_high_res, w_enable_low, w_reverse_out, w_low_batch, w_low_res, w_use_cuda, w_micro_hole_strength,
+        w_dilate_x, w_dilate_y, w_blur_x, w_blur_y, w_dilate_left, w_blur_left, w_blur_left_mix,
+        w_preview_source, w_frame_slider,
+        i_lefteye_folder, i_grid_folder, i_output_folder,
+        i_model_variant, i_mask_antialias, i_tile_size, i_tile_overlap, i_chunk_size, i_overlap, i_original_input_blend_strength,
+        m_inpainted_folder, m_original_folder, m_mask_folder, m_output_folder,
+        m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse, m_batch_chunk_size, m_convergence, m_convergence_mode,
+        m_codec, m_output_crf,
+        m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+        m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
+        m_preview_source, m_frame_slider,
+    ]
 
+    def apply_gui_settings_on_load():
+        cfg = load_gui_settings_merged()
+        w, i, m = cfg["warping"], cfg["inpainting"], cfg["merging"]
+        return (
+            w["input_folder"], w["depth_folder"], w["disparity"], w["lefteye_folder"], w["hires_folder"], w["lowres_folder"],
+            w["high_batch"], w["high_res"], w["enable_low"], w["reverse_out"], w["low_batch"], w["low_res"], w["use_cuda"], w.get("micro_hole_strength", 0.0),
+            w["dilate_x"], w["dilate_y"], w["blur_x"], w["blur_y"], w["dilate_left"], w["blur_left"], w["blur_left_mix"],
+            w["preview_source"], w["frame_slider"],
+            i["lefteye_folder"], i["grid_folder"], i["output_folder"],
+            i["model_variant"], i["mask_antialias"], i["tile_size"], i["tile_overlap"], i["chunk_size"], i["overlap"], i["original_input_blend_strength"],
+            m["inpainted_folder"], m["original_folder"], m["mask_folder"], m["output_folder"],
+            m["output_format"], m["use_gpu"], m["color_transfer"], m["undo_reverse"], m["batch_chunk_size"], m["convergence"], m["convergence_mode"],
+            m["codec"], m["output_crf"],
+            m["mask_bin_thresh"], m["mask_dilate"], m["mask_blur"],
+            m["shadow_shift"], m["shadow_start_op"], m["shadow_decay"], m["shadow_min_op"], m["shadow_gamma"],
+            m["preview_source"], m["frame_slider"],
+        )
+
+    demo.load(apply_gui_settings_on_load, inputs=None, outputs=_gui_persist_inputs)
+
+    for _gui_comp in _gui_persist_inputs:
+        _gui_comp.change(
+            fn=persist_gui_settings_bundle,
+            inputs=_gui_persist_inputs,
+            outputs=None,
+        )
 
 if __name__ == "__main__":
     demo.queue().launch(inbrowser=True)
