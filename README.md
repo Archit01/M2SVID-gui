@@ -42,9 +42,7 @@ This project is a user-friendly GUI version of the original **M2SVID** (Monocula
 ### 3. Download Models (Checkpoints)
 You must download the following weights and place them in a `ckpts` folder in the project root:
 
-1. **Clip & SGM Weights**: Download `ckpts.zip` from [Hi3D repo](https://github.com/yanghb22-fdu/Hi3D-Official) and unzip into `ckpts/`. (Download ckpts.zip from Hi3D repo and unzip (follow step "2. Download checkpoints here and unzip."). Our model follows Hi3D implementation and uses the same openclip model.) Link: https://drive.google.com/file/d/1j_NEG2CPhFeRetYziWK6Qe62R5h7lG_V/view?usp=sharing
-2. **M2SVid Weights**: Download the [M2SVid weights](https://storage.googleapis.com/gresearch/m2svid/m2svid_weights.zip) and extract them into `ckpts/`.
-   - You should have `m2svid_weights.pt` and `m2svid_no_full_atten_weights.pt` in the `ckpts` folder.
+- **M2SVid Weights**: Download the [M2SVid weights](https://huggingface.co/model-m2svid/M2SVID-Int8-FP8/tree/main) and place them into `ckpts/`. You should have `m2svid_weights.pt` and `m2svid_no_full_atten_weights.pt` in the `ckpts` folder.
 
 ---
 
