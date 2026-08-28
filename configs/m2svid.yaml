@@ -75,7 +75,7 @@ model:
               open_clip_embedding_config:
                 target: sgm.modules.encoders.modules.FrozenOpenCLIPImageEmbedder
                 params:
-                  version: "ckpts/open_clip_pytorch_model.bin"
+                  version: ""
                   freeze: True
 
           # vector cond (256)

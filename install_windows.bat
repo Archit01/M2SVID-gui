@@ -46,6 +46,23 @@ if not exist "%PYTHON_DIR%" (
     echo 1. Portable Python 3.12 already exists.
 )
 
+if not exist "%PYTHON_DIR%\Include\Python.h" (
+    echo.
+    echo 3.5 Downloading Python Development Headers and Libraries for Triton / torch.compile...
+    curl -sSL -o py_dev.zip https://www.nuget.org/api/v2/package/python/3.12.9
+    if exist "%TEMP%\py_dev_temp" rmdir /S /Q "%TEMP%\py_dev_temp"
+    mkdir "%TEMP%\py_dev_temp"
+    tar -xf py_dev.zip -C "%TEMP%\py_dev_temp"
+    if not exist "%PYTHON_DIR%\Include" mkdir "%PYTHON_DIR%\Include"
+    if not exist "%PYTHON_DIR%\libs" mkdir "%PYTHON_DIR%\libs"
+    xcopy /E /Y /I "%TEMP%\py_dev_temp\tools\include" "%PYTHON_DIR%\Include" >nul
+    xcopy /E /Y /I "%TEMP%\py_dev_temp\tools\libs" "%PYTHON_DIR%\libs" >nul
+    copy /Y "%TEMP%\py_dev_temp\tools\libs\python312.lib" "%PYTHON_DIR%\" >nul
+    rmdir /S /Q "%TEMP%\py_dev_temp"
+    del py_dev.zip
+    echo Development headers installed successfully.
+)
+
 echo.
 echo 4. Upgrading pip...
 "%PYTHON_EXE%" -m pip install --upgrade pip
@@ -100,6 +117,10 @@ echo 10. Installing CuPy runtime dependency (fastrlock)...
 if %errorlevel% neq 0 (
     echo    WARNING: fastrlock install failed. CuPy may not work.
 )
+
+echo.
+echo 10.5 Patching PyTorch Inductor for Windows Triton and torch.compile compatibility...
+"%PYTHON_EXE%" -c "import os, sys; f1=os.path.join(sys.prefix, 'Lib', 'site-packages', 'torch', '_inductor', 'runtime', 'static_cuda_launcher.py'); f2=os.path.join(sys.prefix, 'Lib', 'site-packages', 'torch', '_inductor', 'runtime', 'triton_heuristics.py'); q=chr(34); s1=q+'i64'+q+': '+q+'l'+q; r1=q+'i64'+q+': '+q+'L'+q+' if os.name == '+q+'nt'+q+' else '+q+'l'+q; s2='(binary.metadata.num_ctas, *binary.metadata.cluster_dims)'; r2='(binary.metadata.num_ctas, *getattr(binary.metadata, '+q+'cluster_dims'+q+', (1, 1, 1)))'; t1=open(f1, 'r').read() if os.path.exists(f1) else ''; open(f1, 'w').write(t1.replace(s1, r1)) if s1 in t1 else None; t2=open(f2, 'r').read() if os.path.exists(f2) else ''; open(f2, 'w').write(t2.replace(s2, r2)) if s2 in t2 else None; print('   PyTorch Inductor Windows patches applied successfully.')"
 
 echo.
 echo 11. Re-verifying PyTorch CUDA installation...

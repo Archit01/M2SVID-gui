@@ -6,9 +6,11 @@ python_embed/
 ckpts/
 outputs/
 input/
-demo/output/
+demo/
+m2svid_gui_settings.json
 *.mp4
 *.zip
 *.pt
 *.npz
 *.mergesettings.json
+

@@ -8,6 +8,7 @@ import numpy as np
 import cv2
 from PIL import Image
 import gc
+import torch
 
 # Lazy imports for heavy modules
 _decord_loaded = False
@@ -156,6 +157,8 @@ def generate_preview_frame(video_info, settings, frame_index=0):
         final_frame = np.stack([depth_vis] * 3, axis=-1)
         pil_img = Image.fromarray(final_frame)
         del video_reader, depth_reader
+        if use_cuda and torch.cuda.is_available():
+            torch.cuda.empty_cache()
         gc.collect()
         return pil_img, num_frames
 
@@ -164,6 +167,8 @@ def generate_preview_frame(video_info, settings, frame_index=0):
         final_frame = np.stack([depth_vis] * 3, axis=-1)
         pil_img = Image.fromarray(final_frame)
         del video_reader, depth_reader
+        if use_cuda and torch.cuda.is_available():
+            torch.cuda.empty_cache()
         gc.collect()
         return pil_img, num_frames
 
@@ -195,6 +200,16 @@ def generate_preview_frame(video_info, settings, frame_index=0):
 
     # Release file handles
     del video_reader, depth_reader
+    
+    # Cleanup GPU tensors
+    if 'reproj_right' in locals():
+        del reproj_right
+    if 'mask' in locals():
+        del mask
+        
+    if use_cuda and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        
     gc.collect()
 
     return pil_img, num_frames

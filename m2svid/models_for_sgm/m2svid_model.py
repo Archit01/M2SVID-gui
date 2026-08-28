@@ -105,9 +105,12 @@ class VideoLDM(DiffusionEngine):
                 sd = sd["state_dict"]
         elif path.endswith("pt"):
             sd_raw = torch.load(path, map_location="cpu")
-            sd = {}
-            for k in sd_raw['module']:
-                sd[k[len('module.'):]] = sd_raw['module'][k]
+            if 'module' in sd_raw:
+                sd = {}
+                for k in sd_raw['module']:
+                    sd[k[len('module.'):]] = sd_raw['module'][k]
+            else:
+                sd = sd_raw
         elif path.endswith("safetensors"):
             sd = load_safetensors(path)
         else:

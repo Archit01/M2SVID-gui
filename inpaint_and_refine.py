@@ -16,6 +16,26 @@ from sgm.util import instantiate_from_config
 import warnings
 import torch.nn.functional as F
 from tqdm import tqdm
+try:
+    from torchao.quantization import quantize_
+    try:
+        from torchao.quantization import Int8WeightOnlyConfig
+        INT8_CONFIG = Int8WeightOnlyConfig()
+    except ImportError:
+        from torchao.quantization import int8_weight_only
+        INT8_CONFIG = int8_weight_only()
+        
+    try:
+        from torchao.quantization import Float8WeightOnlyConfig
+        FP8_CONFIG = Float8WeightOnlyConfig()
+    except ImportError:
+        FP8_CONFIG = None
+        
+    HAS_TORCHAO = True
+except ImportError:
+    HAS_TORCHAO = False
+    INT8_CONFIG = None
+    FP8_CONFIG = None
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -32,8 +52,8 @@ parser.add_argument("--reprojected_closing_holes_kernel", type=int, default=11)
 parser.add_argument("--mask_antialias", type=int, default=False)
 parser.add_argument("--spatial_tile_size", type=int, default=512)
 parser.add_argument("--spatial_tile_overlap", type=int, default=256)
-parser.add_argument("--decode_spatial_tile_size", type=int, default=256)
-parser.add_argument("--decode_spatial_tile_overlap", type=int, default=32)
+parser.add_argument("--decode_window", type=int, default=2, help="Frames decoded together at full resolution (lower if decoding OOMs)")
+parser.add_argument("--decode_temporal_overlap", type=int, default=1, help="Frames cross-faded between consecutive decode windows")
 # New temporal chunking arguments
 parser.add_argument("--chunk_size", type=int, default=25, help="Total frames per model forward pass")
 parser.add_argument("--overlap", type=int, default=3, help="Number of frames to overlap and cross-fade")
@@ -42,6 +62,10 @@ parser.add_argument("--dry_run", action="store_true", help="Print chunk schedule
 parser.add_argument("--steps", type=int, default=None, help="Number of inference steps (default is from model config)")
 # Worker mode for batch processing (R1 optimization)
 parser.add_argument("--worker", action="store_true", help="Run as persistent worker: load model once, process clips from stdin JSON lines")
+parser.add_argument("--int8", action="store_true", default=False, help="Use torchao INT8 weight-only quantization for UNet (saves ~50%% VRAM on weights).")
+parser.add_argument("--fp8", action="store_true", default=False, help="Use torchao FP8 weight-only quantization for UNet.")
+parser.add_argument("--torch_compile", action="store_true", default=False, help="Use torch.compile on the UNet for faster inference.")
+parser.add_argument("--torch_compile_mode", type=str, default="reduce-overhead", choices=["default", "reduce-overhead", "max-autotune"], help="torch.compile optimization mode.")
 args = parser.parse_args()
 
 
@@ -111,14 +135,166 @@ def get_spatial_bounds(length, size, stride):
 # ---------------------------------------------------------------------------
 # Model loading (extracted for reuse in worker mode)
 # ---------------------------------------------------------------------------
-def load_model(model_config_path, ckpt_path, steps=None):
+def load_model(model_config_path, ckpt_path, steps=None, use_int8=False, use_fp8=False):
     """Load and prepare the denoising model. Returns the model in fp16 eval mode on CPU."""
     config = OmegaConf.load(model_config_path)
     if steps is not None and steps > 0:
         config.model.params.sampler_config.params.num_steps = steps
     denoising_model = instantiate_from_config(config.model).cpu()
-    denoising_model.init_from_ckpt(ckpt_path)
     denoising_model = denoising_model.half().eval()
+
+    is_pre_quantized_int8 = ckpt_path.endswith("int8.pt")
+    is_pre_quantized_fp8 = ckpt_path.endswith("fp8.pt")
+    
+    def get_filter(is_full_attention):
+        def filter_attention(mod, fqn):
+            if not isinstance(mod, torch.nn.Linear):
+                return False
+            name_lower = fqn.lower()
+            if is_full_attention and 'attn1' in name_lower:
+                return False
+            return True
+        return filter_attention
+        
+    is_full_attention = "no_full_atten" not in ckpt_path
+    
+    if HAS_TORCHAO:
+        filter_fn = get_filter(is_full_attention)
+        if is_pre_quantized_int8:
+            if ckpt_path.endswith("_all_int8.pt"):
+                print("[INT8] Pre-quantizing entire model structure for _all_int8 checkpoint...")
+                quantize_(denoising_model, INT8_CONFIG, filter_fn=filter_fn)
+            else:
+                print("[INT8] Pre-quantizing UNet structure for INT8 checkpoint...")
+                quantize_(denoising_model.model, INT8_CONFIG, filter_fn=filter_fn)
+        elif is_pre_quantized_fp8 and FP8_CONFIG is not None:
+            if ckpt_path.endswith("_all_fp8.pt"):
+                print("[FP8] Pre-quantizing entire model structure for _all_fp8 checkpoint...")
+                quantize_(denoising_model, FP8_CONFIG, filter_fn=filter_fn)
+            else:
+                print("[FP8] Pre-quantizing UNet structure for FP8 checkpoint...")
+                quantize_(denoising_model.model, FP8_CONFIG, filter_fn=filter_fn)
+        # Note: If use_int8 or use_fp8 flag is True but checkpoint is NOT pre-quantized,
+        # one could dynamically quantize here, but we enforce pre-quantization for safety.
+
+    denoising_model.init_from_ckpt(ckpt_path)
+
+    # Helper to calculate size of tensor subclasses like AffineQuantizedTensor
+    def get_tensor_size(t):
+        if hasattr(t, '__tensor_flatten__'):
+            inner_tensors, _ = t.__tensor_flatten__()
+            return sum(getattr(t, attr).numel() * getattr(t, attr).element_size() for attr in inner_tensors if getattr(t, attr) is not None)
+        return t.numel() * t.element_size()
+
+    unet = denoising_model.model
+
+    if use_int8:
+        if not HAS_TORCHAO:
+            print("[INT8] torchao is NOT installed. Skipping INT8 quantization.")
+            print("[INT8] Install with: pip install torchao")
+        else:
+            if not is_pre_quantized_int8:
+                print("[INT8] Applying INT8 weight-only quantization to UNet after loading FP16...")
+                param_bytes_before = sum(get_tensor_size(p) for p in unet.parameters())
+                quantize_(unet, INT8_CONFIG, filter_fn=get_filter(is_full_attention))
+                param_bytes_after = sum(get_tensor_size(p) for p in unet.parameters())
+                print(f"[INT8] UNet size shrunk from {param_bytes_before / 1024**2:.1f} MB -> {param_bytes_after / 1024**2:.1f} MB")
+            else:
+                print("[INT8] Verified: Loaded pre-quantized INT8 checkpoint.")
+
+            # Check for quantized tensor types
+            n_quantized = 0
+            n_regular = 0
+            sample_types = set()
+            for name, p in unet.named_parameters():
+                class_name = p.__class__.__name__
+                sample_types.add(class_name)
+                if 'Quantized' in class_name or 'Int8' in class_name or ('int8' in str(p.dtype)):
+                    n_quantized += 1
+                else:
+                    n_regular += 1
+
+            param_bytes_current = sum(get_tensor_size(p) for p in unet.parameters())
+            print(f"[INT8] Current UNet parameter size: {param_bytes_current / 1024**2:.1f} MB")
+            print(f"[INT8] Parameter dtypes found: {sample_types}")
+            print(f"[INT8] Quantized layers: {n_quantized}, Regular layers: {n_regular}")
+    else:
+        print("[Model Info] INT8 quantization: disabled")
+
+    return denoising_model
+
+
+def move_module_device(module, device):
+    """Move an nn.Module (including torchao quantized tensors and torch.compile modules)
+    in-place to target device without triggering PyTorch's _apply() parameter swapping,
+    which fails on compiled modules due to Dynamo weakrefs.
+    """
+    def move_t(t, d):
+        if hasattr(t, '__tensor_flatten__'):
+            attrs, _ = t.__tensor_flatten__()
+            for a in attrs:
+                val = getattr(t, a, None)
+                if val is not None:
+                    move_t(val, d)
+        else:
+            if hasattr(t, 'data') and t.device != torch.device(d):
+                t.data = t.data.to(d)
+
+    target_mod = getattr(module, '_orig_mod', module)
+    for p in target_mod.parameters():
+        move_t(p, device)
+    for b in target_mod.buffers():
+        move_t(b, device)
+
+
+def apply_torch_compile(denoising_model, mode="reduce-overhead"):
+    """Apply torch.compile to the UNet's inner diffusion model for faster inference.
+    
+    Disables gradient checkpointing first (unnecessary during inference and causes
+    graph breaks that prevent efficient compilation). Falls back gracefully if
+    compilation fails (e.g. Triton not available).
+    """
+    os.environ["TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER"] = "0"
+    import packaging.version
+    if packaging.version.parse(torch.__version__) < packaging.version.parse("2.0.0"):
+        print("[torch.compile] Requires PyTorch >= 2.0. Skipping.")
+        return denoising_model
+
+    # Disable gradient checkpointing on all modules — it's only useful for training
+    # and causes graph breaks that prevent torch.compile from optimizing fully.
+    disabled_count = 0
+    for module in denoising_model.modules():
+        if hasattr(module, 'use_checkpoint') and module.use_checkpoint:
+            module.use_checkpoint = False
+            disabled_count += 1
+    if disabled_count > 0:
+        print(f"[torch.compile] Disabled gradient checkpointing on {disabled_count} modules (inference-only).")
+
+    # Move model to CUDA before compiling so the graph is built natively on GPU
+    if hasattr(denoising_model, 'model'):
+        denoising_model.model.to('cuda')
+
+    # Compile the inner diffusion model (VideoUNet) — NOT the full DiffusionEngine.
+    # The wrapper (OpenAIWrapper) just concatenates inputs, so compiling the inner
+    # model captures the heavy compute while avoiding issues with the outer state.
+    target = denoising_model.model.diffusion_model
+    print(f"[torch.compile] Compiling UNet with mode='{mode}', backend='inductor'...")
+    print(f"[torch.compile] First forward pass will be slow (~30-120s) as Triton compiles GPU kernels.")
+
+    try:
+        compiled = torch.compile(
+            target,
+            mode=mode,
+            backend="inductor",
+            fullgraph=False,  # Allow graph breaks for xFormers/custom ops
+        )
+        denoising_model.model.diffusion_model = compiled
+        denoising_model.is_compiled = True
+        print(f"[torch.compile] UNet compiled successfully.")
+    except Exception as e:
+        print(f"[torch.compile] Compilation failed, falling back to eager mode: {e}")
+        print(f"[torch.compile] This may be due to missing Triton. Install with: pip install triton-windows")
+
     return denoising_model
 
 
@@ -134,7 +310,8 @@ def process_clip(denoising_model, job):
             video_path, grid_video_path, output_folder,
             reprojected_closing_holes_kernel, mask_antialias,
             spatial_tile_size, spatial_tile_overlap,
-            chunk_size, overlap, original_input_blend_strength, dry_run
+            chunk_size, overlap, decode_window, decode_temporal_overlap,
+            original_input_blend_strength, dry_run
     """
     seed = random.randint(0, 65535)
     seed_everything(seed)
@@ -149,6 +326,8 @@ def process_clip(denoising_model, job):
     spatial_tile_overlap = job.get("spatial_tile_overlap", 256)
     chunk_size = job.get("chunk_size", 25)
     overlap = job.get("overlap", 3)
+    decode_window = max(1, job.get("decode_window", 2))
+    decode_temporal_overlap = max(0, min(job.get("decode_temporal_overlap", 1), decode_window - 1))
     original_input_blend_strength = job.get("original_input_blend_strength", 0.0)
     dry_run = job.get("dry_run", False)
 
@@ -362,7 +541,7 @@ def process_clip(denoising_model, job):
         # PASS 2: SAMPLING
         # ----------------------------------------------------
         if hasattr(denoising_model, 'model'):
-            denoising_model.model.to('cuda')
+            move_module_device(denoising_model.model, 'cuda')
 
         spatial_pbar = tqdm(total=len(h_bounds) * len(w_bounds),
                             desc=f"Spatial Tiles for chunk {ci} (frames {abs_start}-{abs_start+actual_len-1})",
@@ -432,7 +611,7 @@ def process_clip(denoising_model, job):
         spatial_pbar.close()
         
         if hasattr(denoising_model, 'model'):
-            denoising_model.model.to('cpu')
+            move_module_device(denoising_model.model, 'cpu')
 
         # Resolve spatial blending on GPU, then transfer back to CPU for temporal blending
         resolved = (chunk_latents / chunk_weights).cpu()  # (1, 4, n_gen, lH, lW)
@@ -442,95 +621,62 @@ def process_clip(denoising_model, job):
         # when loading first_stage_model onto GPU
         torch.cuda.empty_cache()
 
-        first_stage_model.decoder.to('cuda')
+        # The model is already loaded in FP16 by default and autocast is disabled
+        # in the config. We just need to move it to GPU.
+        first_stage_model.to('cuda')
         
-        # Decode with spatial tiling: split latent into exactly 4 tiles (2x2 grid)
-        # and chunk temporally to save VRAM. decode_chunk_size controls temporal
-        # batch size through the 3D conv decoder.
-        decode_chunk_size = 4  # Configurable: temporal frames decoded together
-        decode_tile_overlap_px = 8  # Overlap in latent pixels between adjacent tiles
-        
-        # Split latent into 2x2 grid with overlap
-        tile_h = (chunk_latent_H + decode_tile_overlap_px) // 2
-        tile_h = min(tile_h, chunk_latent_H)
-        tile_w = (chunk_latent_W + decode_tile_overlap_px) // 2
-        tile_w = min(tile_w, chunk_latent_W)
-        
-        h_tiles = [(0, tile_h), (chunk_latent_H - tile_h, chunk_latent_H)]
-        w_tiles = [(0, tile_w), (chunk_latent_W - tile_w, chunk_latent_W)]
-        tile_grid = [(hs, he, ws, we) for (hs, he) in h_tiles for (ws, we) in w_tiles]
-        
-        # Actual pixel-space overlap sizes for blending ramps
-        h_overlap_px = (2 * tile_h - chunk_latent_H) * 8
-        w_overlap_px = (2 * tile_w - chunk_latent_W) * 8
-        
-        n_temporal_chunks = (n_gen + decode_chunk_size - 1) // decode_chunk_size
-        total_decode_steps = n_temporal_chunks * len(tile_grid)
-        
-        resolved_pixels_list = []
-        
-        decode_pbar = tqdm(total=total_decode_steps,
-                           desc=f"Decoding (4 tiles) chunk {ci}",
+        # Decode at FULL spatial resolution. Spatially tiled VAE decoding gives
+        # each tile slightly different per-frame normalization statistics, which
+        # shows up as tile-shaped color shifts that flicker over time. VRAM is
+        # bounded instead by decoding in overlapping temporal windows that are
+        # cross-faded in pixel space, so the VideoDecoder's temporal layers
+        # still get a multi-frame window to stabilize per-frame color.
+        t_stride = max(1, decode_window - decode_temporal_overlap)
+        t_bounds = get_spatial_bounds(n_gen, decode_window, t_stride)
+
+        # Accumulators for temporal cross-fading of decode windows (CPU)
+        pixel_accum = torch.zeros((1, 3, n_gen, H, W), dtype=torch.float16)
+        weight_accum = torch.zeros((1, 1, n_gen, 1, 1), dtype=torch.float16)
+
+        decode_pbar = tqdm(total=len(t_bounds),
+                           desc=f"Decoding Spatial chunk {ci}",
                            leave=False)
 
-        for f_idx in range(0, n_gen, decode_chunk_size):
-            end_idx = min(f_idx + decode_chunk_size, n_gen)
-            cur_n_gen = end_idx - f_idx
+        for t_s, t_e in t_bounds:
+            win_len = t_e - t_s
+            latent_win = resolved[:, :, t_s:t_e].cuda()
             
-            # Accumulators for weighted blending of 4 tiles
-            pixel_accum = torch.zeros((1, 3, cur_n_gen, H, W), dtype=torch.float32)
-            weight_accum = torch.zeros((1, 1, cur_n_gen, H, W), dtype=torch.float32)
+            # Explicitly cast to half so no FP32 promotion happens
+            latent_win_flat = einops.rearrange(latent_win, 'b c t h w -> (b t) c h w').half()
             
-            for lh_s, lh_e, lw_s, lw_e in tile_grid:
-                # Decode this tile
-                latent_tile = resolved[:, :, f_idx:end_idx, lh_s:lh_e, lw_s:lw_e].cuda()
-                latent_tile_flat = einops.rearrange(latent_tile, 'b c t h w -> (b t) c h w')
-                with torch.inference_mode():
-                    with torch.autocast("cuda", dtype=torch.float16):
-                        decoded_flat = denoising_model.decode_first_stage(latent_tile_flat, num_video_frames=cur_n_gen)
-                decoded_tile = einops.rearrange(decoded_flat, '(b t) c h w -> b c t h w', b=1, t=cur_n_gen).cpu().float()
-                del latent_tile, latent_tile_flat, decoded_flat
-                
-                # Pixel-space coordinates for this tile
-                ph_s, ph_e = lh_s * 8, lh_e * 8
-                pw_s, pw_e = lw_s * 8, lw_e * 8
-                tile_ph = ph_e - ph_s
-                tile_pw = pw_e - pw_s
-                
-                # Build separable 2D blending weight with ramps at overlap edges
-                w_h = torch.ones(tile_ph, dtype=torch.float32)
-                w_w = torch.ones(tile_pw, dtype=torch.float32)
-                
-                if ph_s > 0 and h_overlap_px > 0:  # Top edge overlaps with tile above
-                    ramp_len = min(h_overlap_px, tile_ph)
-                    w_h[:ramp_len] = torch.linspace(0, 1, ramp_len)
-                if ph_e < H and h_overlap_px > 0:   # Bottom edge overlaps with tile below
-                    ramp_len = min(h_overlap_px, tile_ph)
-                    w_h[-ramp_len:] = torch.linspace(1, 0, ramp_len)
-                if pw_s > 0 and w_overlap_px > 0:   # Left edge overlaps with tile to the left
-                    ramp_len = min(w_overlap_px, tile_pw)
-                    w_w[:ramp_len] = torch.linspace(0, 1, ramp_len)
-                if pw_e < W and w_overlap_px > 0:   # Right edge overlaps with tile to the right
-                    ramp_len = min(w_overlap_px, tile_pw)
-                    w_w[-ramp_len:] = torch.linspace(1, 0, ramp_len)
-                
-                # Outer product → 2D weight mask, broadcast over batch/channel/time
-                weight_2d = w_h.view(1, 1, 1, -1, 1) * w_w.view(1, 1, 1, 1, -1)
-                
-                pixel_accum[:, :, :, ph_s:ph_e, pw_s:pw_e] += decoded_tile * weight_2d
-                weight_accum[:, :, :, ph_s:ph_e, pw_s:pw_e] += weight_2d
-                
-                del decoded_tile, weight_2d
-                decode_pbar.update(1)
-            
-            # Resolve weighted average and convert back to half precision
-            decoded_chunk = (pixel_accum / weight_accum).half()
-            resolved_pixels_list.append(decoded_chunk)
-            del pixel_accum, weight_accum, decoded_chunk
+            with torch.inference_mode():
+                decoded_flat = denoising_model.decode_first_stage(latent_win_flat, num_video_frames=win_len)
+            decoded_win = einops.rearrange(decoded_flat, '(b t) c h w -> b c t h w', b=1, t=win_len).cpu().half()
+            del latent_win, latent_win_flat, decoded_flat
+            torch.cuda.empty_cache()
+
+            # Temporal cross-fade ramps at window edges. Ramp endpoints are
+            # excluded so aligned head/tail ramps sum to 1 and no frame ever
+            # gets zero total weight.
+            w_t = torch.ones(win_len, dtype=torch.float16)
+            ramp_len = min(decode_temporal_overlap, win_len)
+            if t_s > 0 and ramp_len > 0:
+                w_t[:ramp_len] = torch.linspace(0, 1, ramp_len + 2)[1:-1]
+            if t_e < n_gen and ramp_len > 0:
+                w_t[-ramp_len:] = torch.linspace(1, 0, ramp_len + 2)[1:-1]
+            w_t = w_t.view(1, 1, -1, 1, 1)
+
+            pixel_accum[:, :, t_s:t_e] += decoded_win * w_t
+            weight_accum[:, :, t_s:t_e] += w_t
+
+            del decoded_win
+            decode_pbar.update(1)
 
         decode_pbar.close()
-        
-        resolved_pixels = torch.cat(resolved_pixels_list, dim=2)
+
+        # Resolve weighted average and convert back to half precision
+        resolved_pixels = (pixel_accum / weight_accum).half()
+        del pixel_accum, weight_accum
 
         new_overlap_buffer = []
 
@@ -582,7 +728,9 @@ if __name__ == "__main__":
         # WORKER MODE (R1): Load model once, process clips from stdin
         # ---------------------------------------------------------------
         print("Loading model (worker mode)...")
-        denoising_model = load_model(args.model_config, args.ckpt, args.steps)
+        denoising_model = load_model(args.model_config, args.ckpt, args.steps, args.int8, args.fp8)
+        if args.torch_compile:
+            denoising_model = apply_torch_compile(denoising_model, mode=args.torch_compile_mode)
         
         # Signal readiness to parent process
         sys.stdout.write("###WORKER_READY###\n")
@@ -622,7 +770,9 @@ if __name__ == "__main__":
         # ---------------------------------------------------------------
         # LEGACY MODE: Single-clip processing (backward compatible)
         # ---------------------------------------------------------------
-        denoising_model = load_model(args.model_config, args.ckpt, args.steps)
+        denoising_model = load_model(args.model_config, args.ckpt, args.steps, args.int8, args.fp8)
+        if args.torch_compile:
+            denoising_model = apply_torch_compile(denoising_model, mode=args.torch_compile_mode)
         job = {
             "video_path": args.video_path,
             "grid_video_path": args.grid_video_path,
@@ -633,6 +783,8 @@ if __name__ == "__main__":
             "spatial_tile_overlap": args.spatial_tile_overlap,
             "chunk_size": args.chunk_size,
             "overlap": args.overlap,
+            "decode_window": args.decode_window,
+            "decode_temporal_overlap": args.decode_temporal_overlap,
             "original_input_blend_strength": args.original_input_blend_strength,
             "dry_run": args.dry_run,
         }

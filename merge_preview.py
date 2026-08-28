@@ -310,6 +310,27 @@ def generate_preview_frame(video_info, settings, frame_index=0):
     lap_levels = int(settings.get("laplacian_blend_levels", 0))
     if lap_levels > 0:
         blended_right_eye = apply_laplacian_blend(warped_original, inpainted, processed_mask, levels=lap_levels)
+    elif settings.get("poisson_blend", False):
+        import cv2
+        import numpy as np
+        blended_frames = []
+        for b_i in range(warped_original.shape[0]):
+            src = (inpainted[b_i].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            dst = (warped_original[b_i].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            m = (processed_mask[b_i, 0].cpu().numpy() * 255).astype(np.uint8)
+            y_idx, x_idx = np.where(m > 0)
+            if len(y_idx) > 0 and len(x_idx) > 0:
+                center = (int(np.mean(x_idx)), int(np.mean(y_idx)))
+                try:
+                    cloned = cv2.seamlessClone(src, dst, m, center, cv2.NORMAL_CLONE)
+                    cloned_tensor = torch.from_numpy(cloned).float().permute(2, 0, 1) / 255.0
+                    cloned_tensor = cloned_tensor.to(device)
+                except Exception as e:
+                    cloned_tensor = warped_original[b_i] * (1 - processed_mask[b_i]) + inpainted[b_i] * processed_mask[b_i]
+            else:
+                cloned_tensor = warped_original[b_i]
+            blended_frames.append(cloned_tensor)
+        blended_right_eye = torch.stack(blended_frames)
     else:
         blended_right_eye = warped_original * (1 - processed_mask) + inpainted * processed_mask
 

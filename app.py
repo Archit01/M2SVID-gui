@@ -11,14 +11,10 @@ import platform
 import logging
 import tempfile
 import threading
-
-
 # Set up logging for cleaner debugging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 _settings_lock = threading.Lock()
-
 _M2SVID_BLOCKS_CSS = """
 /* Light Mode Defaults */
 body {
@@ -28,7 +24,6 @@ body {
 .gradio-container {
     background: transparent !important;
 }
-
 /* Base Panel Setup */
 .panel, .gradio-panel {
     background: transparent !important;
@@ -38,7 +33,6 @@ body {
     position: relative;
     z-index: 1;
 }
-
 /* Glassmorphism layer (Light) */
 .panel::before, .gradio-panel::before {
     content: "";
@@ -52,12 +46,10 @@ body {
     z-index: -1;
     pointer-events: none;
 }
-
 /* Fix stacking context for Dropdowns to pop over other panels */
 .panel:focus-within, .gradio-panel:focus-within {
     z-index: 9999 !important;
 }
-
 /* Fix Dropdown Menu styling */
 ul.options, .options {
     background: #ffffff !important;
@@ -73,7 +65,6 @@ ul.options li.selected, .options li.selected {
 ul.options li:hover, .options li:hover {
     background: #e2e8f0 !important;
 }
-
 /* Vibrant Primary Buttons (Shared) */
 button.primary {
     background: linear-gradient(90deg, #6366f1 0%, #a855f7 100%) !important;
@@ -86,7 +77,6 @@ button.primary:hover {
     transform: translateY(-2px) !important;
     box-shadow: 0 6px 20px rgba(99, 102, 241, 0.6) !important;
 }
-
 /* Enhanced tabs (Shared) */
 .tabs > .tab-nav > button {
     font-weight: bold !important;
@@ -103,7 +93,6 @@ button.primary:hover {
     object-fit: contain !important;
     object-position: center center !important;
 }
-
 /* Animated Progress Bar Container (Light) */
 .progress-container {
     background: rgba(255, 255, 255, 0.8);
@@ -113,23 +102,19 @@ button.primary:hover {
     overflow: hidden;
     box-shadow: inset 0px 4px 6px rgba(0,0,0,0.1);
 }
-
 .progress-text {
     color: #0f172a;
 }
-
 /* Dark Mode Overrides */
 .dark body, body.dark {
     background: linear-gradient(135deg, #09090b 0%, #1e1b4b 100%) !important; 
     color: #f8fafc !important;
 }
-
 .dark .panel::before, .dark .gradio-panel::before, body.dark .panel::before, body.dark .gradio-panel::before {
     background: rgba(30, 41, 59, 0.5) !important;
     border: 1px solid rgba(255, 255, 255, 0.08) !important;
     box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3) !important;
 }
-
 .dark ul.options, body.dark ul.options, .dark .options, body.dark .options {
     background: #1e293b !important;
     color: #f8fafc !important;
@@ -142,24 +127,20 @@ button.primary:hover {
 .dark ul.options li:hover, body.dark ul.options li:hover, .dark .options li:hover, body.dark .options li:hover {
     background: #475569 !important;
 }
-
 .dark .progress-container, body.dark .progress-container {
     background: rgba(30, 41, 59, 0.4);
     border: 1px solid rgba(255,255,255,0.1);
     box-shadow: inset 0px 4px 6px rgba(0,0,0,0.4);
 }
-
 .dark .progress-text, body.dark .progress-text {
     color: #f8fafc;
 }
-
 /* Animated Progress Bar */
 @keyframes progress-shine {
     0% { transform: translateX(-100%); }
     100% { transform: translateX(100%); }
 }
 """
-
 def make_progress_html(percentage, label):
     # Ensure percentage is bound between 0 and 100 for safety
     p = max(0, min(100, int(percentage)))
@@ -176,7 +157,6 @@ def make_progress_html(percentage, label):
         </div>
     </div>
     """
-
 m2svid_theme = gr.themes.Base(
     primary_hue="purple",
     secondary_hue="indigo",
@@ -200,12 +180,9 @@ m2svid_theme = gr.themes.Base(
     button_primary_text_color="white",
     slider_color="*primary_500",
 )
-
 def _gui_settings_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "m2svid_gui_settings.json")
-
 GUI_SETTINGS_VERSION = 1
-
 def default_gui_settings():
     return {
         "version": GUI_SETTINGS_VERSION,
@@ -247,6 +224,11 @@ def default_gui_settings():
             "chunk_size": 25,
             "overlap": 3,
             "original_input_blend_strength": 0.0,
+            "inference_steps": 1,
+            "decode_window": 2,
+            "decode_temporal_overlap": 1,
+            "torch_compile": False,
+            "torch_compile_mode": "reduce-overhead",
         },
         "merging": {
             "inpainted_folder": "demo/refine_output",
@@ -256,6 +238,7 @@ def default_gui_settings():
             "output_format": "Full SBS (Left-Right)",
             "use_gpu": True,
             "color_transfer": True,
+            "poisson_blend": False,
             "undo_reverse": False,
             "batch_chunk_size": 10,
             "convergence": 35,
@@ -277,7 +260,6 @@ def default_gui_settings():
             "frame_slider": 0,
         },
     }
-
 def load_gui_settings_merged():
     base = default_gui_settings()
     path = _gui_settings_path()
@@ -295,7 +277,6 @@ def load_gui_settings_merged():
         if section in disk and isinstance(disk[section], dict):
             base[section].update(disk[section])
     return base
-
 def save_gui_settings_file(settings_dict):
     path = _gui_settings_path()
     payload = dict(settings_dict)
@@ -313,8 +294,6 @@ def save_gui_settings_file(settings_dict):
         except OSError:
             pass
         raise
-
-
 def pack_gui_settings_dict(args_tuple):
     (
         w_input_folder, w_depth_folder, w_disparity, w_lefteye_folder, w_hires_folder, w_lowres_folder,
@@ -324,8 +303,10 @@ def pack_gui_settings_dict(args_tuple):
         w_preview_source, w_frame_slider,
         i_lefteye_folder, i_grid_folder, i_output_folder,
         i_model_variant, i_mask_antialias, i_tile_size, i_tile_overlap, i_chunk_size, i_overlap, i_original_input_blend_strength,
+        i_inference_steps, i_decode_window, i_decode_temporal_overlap,
+        i_torch_compile, i_torch_compile_mode,
         m_inpainted_folder, m_original_folder, m_mask_folder, m_output_folder,
-        m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse, m_batch_chunk_size, m_convergence, m_convergence_mode,
+        m_output_format, m_use_gpu, m_color_transfer, m_poisson_blend, m_undo_reverse, m_batch_chunk_size, m_convergence, m_convergence_mode,
         m_codec, m_output_crf,
         m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
         m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
@@ -371,6 +352,11 @@ def pack_gui_settings_dict(args_tuple):
             "chunk_size": i_chunk_size,
             "overlap": i_overlap,
             "original_input_blend_strength": i_original_input_blend_strength,
+            "inference_steps": i_inference_steps,
+            "decode_window": i_decode_window,
+            "decode_temporal_overlap": i_decode_temporal_overlap,
+            "torch_compile": i_torch_compile,
+            "torch_compile_mode": i_torch_compile_mode,
         },
         "merging": {
             "inpainted_folder": m_inpainted_folder,
@@ -380,6 +366,7 @@ def pack_gui_settings_dict(args_tuple):
             "output_format": m_output_format,
             "use_gpu": m_use_gpu,
             "color_transfer": m_color_transfer,
+            "poisson_blend": m_poisson_blend,
             "undo_reverse": m_undo_reverse,
             "batch_chunk_size": m_batch_chunk_size,
             "convergence": m_convergence,
@@ -401,13 +388,11 @@ def pack_gui_settings_dict(args_tuple):
             "frame_slider": m_frame_slider,
         },
     }
-
 def persist_gui_settings_bundle(*args):
     try:
         save_gui_settings_file(pack_gui_settings_dict(args))
     except Exception as e:
         logger.warning(f"Could not save GUI settings: {e}")
-
 def check_file_conflicts(files, target_folders, suffixes):
     """Checks if any proposed output files already exist."""
     conflicts = []
@@ -422,7 +407,6 @@ def check_file_conflicts(files, target_folders, suffixes):
                 if os.path.exists(path):
                     conflicts.append(os.path.basename(path))
     return conflicts
-
 def browse_folder(current_val):
     """Open a native Windows folder picker dialog using PowerShell (no tkinter needed)."""
     if platform.system() != "Windows":
@@ -445,15 +429,12 @@ def browse_folder(current_val):
     except Exception:
         pass
     return current_val
-
 # Paths configuration
 env_vars = os.environ.copy()
 env_vars['PYTHONPATH'] = f".;.\\third_party\\Hi3D-Official;.\\third_party\\pytorch-msssim;{env_vars.get('PYTHONPATH', '')}"
-
 def parse_res(res_str):
     w, h = map(int, res_str.lower().split('x'))
     return w, h
-
 def run_subprocess_with_progress(cmd, env, progress_desc="Processing"):
     process = subprocess.Popen(
         cmd, env=env, 
@@ -499,7 +480,6 @@ def run_subprocess_with_progress(cmd, env, progress_desc="Processing"):
     if process.returncode != 0:
         error_msg = "\n".join(full_log[-20:]) # Get last 20 lines of log
         raise Exception(f"Command failed with code {process.returncode}:\n{error_msg}")
-
 def wait_for_worker_ready(worker_process, timeout=300):
     """Block until the worker subprocess prints ###WORKER_READY### or the process dies.
     Returns True on success, raises Exception on failure."""
@@ -516,12 +496,13 @@ def wait_for_worker_ready(worker_process, timeout=300):
                 raise Exception("Worker process exited before becoming ready")
             continue
         if char in ['\r', '\n']:
+            if buffer.strip():
+                print(f"[Worker] {buffer}", flush=True)
             if "###WORKER_READY###" in buffer:
                 return True
             buffer = ""
         else:
             buffer += char
-
 def run_worker_job_with_progress(worker_process, job_dict, progress_desc="Processing"):
     """Send a JSON job to a persistent worker and yield progress until JOB_COMPLETE/JOB_FAILED.
     
@@ -573,7 +554,6 @@ def run_worker_job_with_progress(worker_process, job_dict, progress_desc="Proces
             buffer = ""
         else:
             buffer += char
-
 def reverse_video(path):
     """Reverses a video file using FFmpeg's reverse filter."""
     if not os.path.exists(path):
@@ -594,7 +574,6 @@ def reverse_video(path):
         if os.path.exists(temp_path):
             os.remove(temp_path)
         raise Exception(f"FFmpeg video reversal failed for {path}:\n{res.stderr.decode('utf-8')}")
-
 def process_warping(
     input_folder, depth_folder, left_eye_folder, high_res_folder, low_res_folder,
     disparity_perc, high_batch, high_res, enable_low_res, low_batch, low_res,
@@ -613,7 +592,6 @@ def process_warping(
     if not left_eye_folder or not high_res_folder or (enable_low_res and not low_res_folder):
         yield 0, 0, "Please define all required output folders.", "Error"
         return
-
     os.makedirs(left_eye_folder, exist_ok=True)
     os.makedirs(high_res_folder, exist_ok=True)
     if enable_low_res:
@@ -621,17 +599,14 @@ def process_warping(
         target_res_str = low_res
     else:
         target_res_str = high_res
-
     w_target, h_target = parse_res(target_res_str)
     w_high, h_high = parse_res(high_res)
-
     video_files = glob.glob(os.path.join(input_folder, "*.mp4"))
     
     total_files = len(video_files)
     if total_files == 0:
         yield 0, 0, "No mp4 files found in input folder.", "Error"
         return
-
     for i, video_path in enumerate(video_files):
         file_perc = int((i / total_files) * 100)
         filename = os.path.basename(video_path)
@@ -682,7 +657,6 @@ def process_warping(
             active_micro_hole_strength = micro_hole_strength
             active_use_gapw = use_gapw
             active_gapw_delta = gapw_delta
-
         # Conflict Check
         left_eye_out = os.path.join(left_eye_folder, f"{base_name}_lefteye.mp4")
         high_res_out = os.path.join(high_res_folder, f"{base_name}_{w_high}_splatted2.mp4")
@@ -705,7 +679,6 @@ def process_warping(
                     try: os.remove(out_file)
                     except: pass
         
-
         # 1. Downscale Left Eye
         left_eye_out = os.path.join(left_eye_folder, f"{base_name}_lefteye.mp4")
         cmd_scale = [
@@ -719,7 +692,6 @@ def process_warping(
         res = subprocess.run(cmd_scale, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if res.returncode != 0:
             raise Exception(f"FFmpeg resizing failed:\n{res.stderr.decode('utf-8')}")
-
         if not enable_low_res:
             high_res_in_path = left_eye_out
             temp_high_res = None
@@ -736,7 +708,6 @@ def process_warping(
             if res.returncode != 0:
                 raise Exception(f"FFmpeg resizing (High Res) failed:\n{res.stderr.decode('utf-8')}")
             high_res_in_path = temp_high_res
-
         # 2. High Res Warping (on scaled video)
         high_res_out = os.path.join(high_res_folder, f"{base_name}_{w_high}_splatted2.mp4")
         cmd_warp_high = [
@@ -765,8 +736,6 @@ def process_warping(
             cmd_warp_high.extend(["--gapw_delta", str(active_gapw_delta)])
         for sub_perc, desc in run_subprocess_with_progress(cmd_warp_high, env_vars, f"High Res Warping"):
             yield file_perc, sub_perc, f"File {i+1}/{total_files} | {filename} - {desc}", "Running"
-
-
         # 3. Low Res Warping (Optional, on downscaled video)
         if enable_low_res:
             w_low, h_low = parse_res(low_res)
@@ -797,8 +766,6 @@ def process_warping(
                 cmd_warp_low.extend(["--gapw_delta", str(active_gapw_delta)])
             for sub_perc, desc in run_subprocess_with_progress(cmd_warp_low, env_vars, f"Low Res Warping"):
                 yield file_perc, sub_perc, f"File {i+1}/{total_files} | {filename} - {desc}", "Running"
-
-
         # 5. Final Reversal (at the end of all steps for this video)
         if reverse_output:
             yield file_perc, 90, f"{filename} - Finalizing (Reversing Output Videos)", "Running"
@@ -806,17 +773,14 @@ def process_warping(
             reverse_video(high_res_out)
             if enable_low_res:
                 reverse_video(low_res_out)
-
         if temp_high_res and os.path.exists(temp_high_res):
             os.remove(temp_high_res)
-
-
     yield 100, 100, "All files processed.", "Warping Section Processing Complete!"
-
 def process_inpainting(
     left_eye_folder, grid_folder, output_folder,
     mask_antialias, tile_size, tile_overlap, chunk_size, overlap, original_input_blend_strength,
-    model_variant, inference_steps=1, conflict_policy="skip"
+    model_variant, inference_steps=1, decode_window=2, decode_temporal_overlap=1, use_torch_compile=False, torch_compile_mode="reduce-overhead",
+    conflict_policy="skip"
 ):
     if not left_eye_folder or not os.path.isdir(left_eye_folder):
         yield 0, 0, 0, "Left Eye folder does not exist.", "Error"
@@ -832,22 +796,20 @@ def process_inpainting(
     
     inpaint_env = env_vars.copy()
     inpaint_env['PYTORCH_ALLOC_CONF'] = 'max_split_size_mb:128'
-
+    inpaint_env['TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER'] = '0'
     left_eye_files = glob.glob(os.path.join(left_eye_folder, "*_lefteye.mp4"))
     total_files = len(left_eye_files)
     
     if total_files == 0:
         yield 0, 0, 0, "No *_lefteye.mp4 files found in Left Eye Folder.", "Error"
         return
-
     # Determine model config/ckpt once (same for all clips in a batch)
     if "Option 2" in model_variant:
         model_config = "configs/m2svid_no_fullatten.yaml"
-        ckpt = "ckpts/m2svid_no_full_atten_weights.pt"
+        ckpt = "ckpts/m2svid_no_full_atten_weights_all_int8.pt"
     else:
         model_config = "configs/m2svid.yaml"
-        ckpt = "ckpts/m2svid_weights.pt"
-
+        ckpt = "ckpts/m2svid_weights_unet_fp8.pt"
     # Launch persistent worker subprocess (R1: model loads only once)
     cmd_worker = [
         sys.executable, "inpaint_and_refine.py",
@@ -856,6 +818,15 @@ def process_inpainting(
         "--ckpt", ckpt,
         "--steps", str(int(inference_steps))
     ]
+    
+    if "Option 2" in model_variant:
+        cmd_worker.append("--int8")
+    elif "Option 1" in model_variant:
+        cmd_worker.append("--fp8")
+    
+    if use_torch_compile:
+        cmd_worker.append("--torch_compile")
+        cmd_worker.extend(["--torch_compile_mode", str(torch_compile_mode)])
     
     worker = None
     try:
@@ -868,7 +839,6 @@ def process_inpainting(
         )
         wait_for_worker_ready(worker)
         yield 0, 0, 0, "Model loaded. Starting batch processing...", "Running"
-
         for i, left_eye_path in enumerate(left_eye_files):
             file_perc = int((i / total_files) * 100)
             filename = os.path.basename(left_eye_path)
@@ -918,6 +888,8 @@ def process_inpainting(
                 "chunk_size": chunk_size,
                 "overlap": overlap,
                 "original_input_blend_strength": original_input_blend_strength,
+                "decode_window": decode_window,
+                "decode_temporal_overlap": decode_temporal_overlap,
             }
             
             temp_perc = 0
@@ -951,11 +923,10 @@ def process_inpainting(
                 worker.kill()
         
     yield 100, 100, 100, "All files processed.", "Inpainting Section Processing Complete!"
-
 def process_merging(
     has_conflicts,
     inpainted_folder, original_folder, mask_folder, output_folder,
-    use_gpu, output_format, batch_chunk_size, enable_color_transfer,
+    use_gpu, output_format, batch_chunk_size, enable_color_transfer, poisson_blend,
     codec, output_crf,
     mask_binarize_threshold, mask_close_kernel_size, mask_dilate_kernel_size, mask_blur_kernel_size, mask_smoothstep_strength, laplacian_blend_levels,
     shadow_shift, shadow_start_opacity, shadow_opacity_decay, shadow_min_opacity, shadow_decay_gamma,
@@ -984,6 +955,7 @@ def process_merging(
         "output_format": output_format,
         "batch_chunk_size": int(batch_chunk_size),
         "enable_color_transfer": enable_color_transfer,
+        "poisson_blend": poisson_blend,
         "codec": codec,
         "output_crf": int(output_crf),
         "mask_binarize_threshold": float(mask_binarize_threshold),
@@ -1052,7 +1024,6 @@ def process_merging(
         yield file_perc, sub_perc, desc, "Running"
         
     yield 100, 100, "All files processed.", "Merging Section Processing Complete!"
-
 with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_CSS) as demo:
     gr.Markdown("# M2SVID Pipeline Processing")
     
@@ -1088,7 +1059,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     gr.Markdown("### High Res Settings")
                     w_high_batch = gr.Number(label="High Res Batch Size", value=10, precision=0)
                     w_high_res = gr.Textbox(label="High Res Output Resolution (W x H)", value="1920x1024")
-
                 with gr.Column(variant="panel"):
                     gr.Markdown("### Low Res Settings")
                     w_enable_low = gr.Checkbox(label="Enable Low Res Warping", value=True)
@@ -1097,7 +1067,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     w_low_res = gr.Textbox(label="Low Res Output Resolution (W x H)", value="1280x704")
                     w_use_cuda = gr.Checkbox(label="⚡ Enable CUDA Warping", value=False)
                     w_micro_hole_strength = gr.Slider(minimum=0.0, maximum=5.0, value=0.0, step=0.05, label="🕳️ Micro-Hole Fill Strength (0=Off)")
-
             with gr.Row():
                 with gr.Column(variant="panel"):
                     gr.Markdown("### Depth Preprocessing")
@@ -1146,7 +1115,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     w_save_settings_btn = gr.Button("💾 Save Settings for This Video")
                     w_load_settings_btn = gr.Button("📂 Load Settings for This Video")
                     w_settings_status = gr.Textbox(label="Settings Status", interactive=False)
-
             gr.Markdown("---")
             with gr.Row():
                 w_file_prog = gr.HTML(value=make_progress_html(0, "Overall File Progress (%)"))
@@ -1171,7 +1139,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             w_lefteye_btn.click(fn=browse_folder, inputs=[w_lefteye_folder], outputs=[w_lefteye_folder])
             w_hires_btn.click(fn=browse_folder, inputs=[w_hires_folder], outputs=[w_hires_folder])
             w_lowres_btn.click(fn=browse_folder, inputs=[w_lowres_folder], outputs=[w_lowres_folder])
-
             # ---- Warping Preview Handlers ----
             def do_scan_videos_warping(input_f, depth_f):
                 from warp_preview import scan_videos
@@ -1180,13 +1147,11 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     return [], gr.update(choices=[], value=None), "No valid videos/depth pairs found."
                 names = [v["base_name"] for v in vlist]
                 return vlist, gr.update(choices=names, value=names[0]), f"Found {len(vlist)} video(s)"
-
             w_scan_btn.click(
                 fn=do_scan_videos_warping,
                 inputs=[w_input_folder, w_depth_folder],
                 outputs=[w_video_list_state, w_video_dropdown, w_video_info]
             )
-
             def do_preview_warping(video_list, selected_video, frame_idx, preview_source, disparity_perc,
                                    dilate_x, dilate_y, blur_x, blur_y, dilate_left, blur_left, blur_left_mix, use_cuda, micro_hole_strength,
                                    use_gapw, gapw_delta):
@@ -1224,19 +1189,16 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 except Exception as e:
                     print(f"Preview error: {e}")
                     return None, 0
-
             _w_preview_inputs = [
                 w_video_list_state, w_video_dropdown, w_frame_slider, w_preview_source, w_disparity,
                 w_dilate_x, w_dilate_y, w_blur_x, w_blur_y, w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_micro_hole_strength,
                 w_use_gapw, w_gapw_delta
             ]
-
             w_preview_btn.click(
                 fn=do_preview_warping,
                 inputs=_w_preview_inputs,
                 outputs=[w_preview_image, w_frame_slider]
             )
-
             # Auto-preview on param change
             for _ctrl in [w_disparity, w_preview_source, w_frame_slider,
                           w_dilate_x, w_dilate_y, w_blur_x, w_blur_y,
@@ -1246,7 +1208,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     inputs=_w_preview_inputs,
                     outputs=[w_preview_image, w_frame_slider]
                 )
-
             # Save/Load per-video settings
             def save_video_settings_warping(video_list, selected_video, disparity_perc,
                                             dilate_x, dilate_y, blur_x, blur_y,
@@ -1274,7 +1235,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 with open(sidecar_path, "w") as f:
                     json.dump(settings_to_save, f, indent=2)
                 return f"✅ Saved settings to {os.path.basename(sidecar_path)}"
-
             w_save_settings_btn.click(
                 fn=save_video_settings_warping,
                 inputs=[w_video_list_state, w_video_dropdown, w_disparity,
@@ -1282,7 +1242,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                         w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_micro_hole_strength, w_use_gapw, w_gapw_delta],
                 outputs=[w_settings_status]
             )
-
             def load_video_settings_warping(video_list, selected_video):
                 if not video_list or not selected_video:
                     return [gr.update()] * 12 + ["No video selected."]
@@ -1314,14 +1273,12 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     ]
                 except Exception as e:
                     return [gr.update()] * 12 + [f"Error loading settings: {e}"]
-
             w_load_settings_btn.click(
                 fn=load_video_settings_warping,
                 inputs=[w_video_list_state, w_video_dropdown],
                 outputs=[w_disparity, w_dilate_x, w_dilate_y, w_blur_x, w_blur_y,
                          w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_micro_hole_strength, w_use_gapw, w_gapw_delta, w_settings_status]
             )
-
             # Auto-preview & Load on video choice
             w_video_dropdown.change(
                 fn=load_video_settings_warping,
@@ -1334,7 +1291,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                         w_dilate_x, w_dilate_y, w_blur_x, w_blur_y, w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_micro_hole_strength, w_use_gapw, w_gapw_delta],
                 outputs=[w_preview_image, w_frame_slider]
             )
-
             def start_warping_flow(
                 input_f, depth_f, lefteye_f, hires_f, lowres_f,
                 disparity, high_batch, high_res, enable_low, low_batch, low_res,
@@ -1346,7 +1302,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 
                 active_hires = hires_f
                 active_lowres = lowres_f
-
                 # 2. Conflict Scan
                 video_files = glob.glob(os.path.join(input_f, "*.mp4"))
                 w_high, _ = parse_res(high_res)
@@ -1378,7 +1333,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     w_btn: gr.update(interactive=False),
                     w_has_conflicts: False
                 }
-
             # We need to handle the actual processing trigger from multiple points (Direct start or conflict buttons)
             def run_warping_batch(
                 has_conflicts,
@@ -1392,7 +1346,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 
                 active_hires = high_res_folder
                 active_lowres = low_res_folder
-
                 # Overwrite logic: delete files if policy is overwrite
                 if conflict_policy == "overwrite":
                     video_files = glob.glob(os.path.join(input_folder, "*.mp4"))
@@ -1404,14 +1357,12 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                         w_low, _ = parse_res(low_res)
                         suffixes.append(f"_{w_low}_splatted2.mp4")
                     
-
                     for video_path in video_files:
                         base_name = os.path.splitext(os.path.basename(video_path))[0]
                         for folder, sfx in zip(target_folders, suffixes):
                             path = os.path.join(folder, f"{base_name}{sfx}")
                             if os.path.exists(path):
                                 os.remove(path)
-
                 # Call the original processing function
                 for f_perc, s_perc, p_text, p_stat in process_warping(
                     input_folder, depth_folder, left_eye_folder, high_res_folder, low_res_folder,
@@ -1423,7 +1374,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     use_gapw=use_gapw, gapw_delta=gapw_delta
                 ):
                     yield make_progress_html(f_perc, "Overall File Progress (%)"), make_progress_html(s_perc, "Current Stage Progress (%)"), p_text, p_stat
-
             # Define common inputs for warping batch
             _w_inputs = [
                 w_input_folder, w_depth_folder, w_lefteye_folder, w_hires_folder, w_lowres_folder,
@@ -1432,7 +1382,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 w_dilate_x, w_dilate_y, w_blur_x, w_blur_y,
                 w_dilate_left, w_blur_left, w_blur_left_mix
             ]
-
             w_btn.click(
                 fn=start_warping_flow,
                 inputs=_w_inputs,
@@ -1443,14 +1392,12 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 outputs=[w_file_prog, w_sub_prog, w_prog_text, w_output],
                 show_progress="hidden"
             )
-
             w_skip_btn.click(
                 fn=run_warping_batch,
                 inputs=[gr.State(False)] + _w_inputs + [gr.State("skip")],
                 outputs=[w_file_prog, w_sub_prog, w_prog_text, w_output],
                 show_progress="hidden"
             ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [w_conflict_group, w_btn])
-
             w_overwrite_btn.click(
                 fn=run_warping_batch,
                 inputs=[gr.State(False)] + _w_inputs + [gr.State("overwrite")],
@@ -1459,7 +1406,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [w_conflict_group, w_btn])
             
             w_cancel_btn.click(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [w_conflict_group, w_btn])
-
         with gr.Tab("Section 2: Inpainting and Refine"):
             gr.Markdown("Inpaint right eyes using downscaled Left Eye and Grid Video chunks.")
             with gr.Row():
@@ -1486,6 +1432,20 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     i_overlap = gr.Number(label="Overlap (Temporal Crossfade)", value=3, precision=0)
                     i_original_input_blend_strength = gr.Number(label="Original Input Blend Strength (Context)", value=0.0, step=0.1)
                     i_inference_steps = gr.Number(label="Inference Steps (1=Default, 2=Better Quality)", value=1, precision=0)
+                    i_decode_window = gr.Number(label="Decode Window (Frames at Full Res)", value=2, precision=0)
+                    i_decode_temporal_overlap = gr.Number(label="Decode Temporal Overlap", value=1, precision=0)
+                    gr.Markdown("---")
+                    gr.Markdown("### ⚡ torch.compile Optimization")
+                    i_torch_compile = gr.Checkbox(
+                        label="Enable torch.compile (faster UNet inference, ~30-120s initial compile)",
+                        value=False
+                    )
+                    i_torch_compile_mode = gr.Dropdown(
+                        label="Compile Mode",
+                        choices=["reduce-overhead", "default", "max-autotune"],
+                        value="reduce-overhead",
+                        interactive=True
+                    )
                     
             with gr.Row():
                 i_file_prog = gr.HTML(value=make_progress_html(0, "Overall File Progress (%)"))
@@ -1509,11 +1469,10 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             i_lefteye_btn.click(fn=browse_folder, inputs=[i_lefteye_folder], outputs=[i_lefteye_folder])
             i_grid_btn.click(fn=browse_folder, inputs=[i_grid_folder], outputs=[i_grid_folder])
             i_output_btn.click(fn=browse_folder, inputs=[i_output_folder], outputs=[i_output_folder])
-
             def start_inpainting_flow(
                 left_eye_f, grid_f, output_f,
                 mask_antialias, tile_size, tile_overlap, chunk_size, overlap, blend_strength,
-                model_variant, inference_steps
+                model_variant, inference_steps, decode_window, decode_temporal_overlap, use_torch_compile, torch_compile_mode
             ):
                 if not left_eye_f or not os.path.isdir(left_eye_f):
                     return { i_output: "Error: Left Eye folder invalid.", i_has_conflicts: False }
@@ -1541,12 +1500,11 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     i_btn: gr.update(interactive=False),
                     i_has_conflicts: False
                 }
-
             def run_inpainting_batch(
                 has_conflicts,
                 left_eye_folder, grid_folder, output_folder,
                 mask_antialias, tile_size, tile_overlap, chunk_size, overlap, blend_strength,
-                model_variant, inference_steps, conflict_policy="skip"
+                model_variant, inference_steps, decode_window, decode_temporal_overlap, use_torch_compile, torch_compile_mode, conflict_policy="skip"
             ):
                 if has_conflicts:
                     return
@@ -1561,17 +1519,17 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 for f_perc, t_perc, s_perc, p_text, p_stat in process_inpainting(
                     left_eye_folder, grid_folder, output_folder,
                     mask_antialias, tile_size, tile_overlap, chunk_size, overlap, blend_strength,
-                    model_variant, inference_steps, conflict_policy=conflict_policy
+                    model_variant, inference_steps, decode_window=decode_window, decode_temporal_overlap=decode_temporal_overlap,
+                    use_torch_compile=use_torch_compile, torch_compile_mode=torch_compile_mode,
+                    conflict_policy=conflict_policy
                 ):
                     yield make_progress_html(f_perc, "Overall File Progress (%)"), make_progress_html(t_perc, "Temporal Chunks Progress (%)"), make_progress_html(s_perc, "Spatial Tiles Progress (%)"), p_text, p_stat
-
             # Define common inputs for inpainting batch
             _i_inputs = [
                 i_lefteye_folder, i_grid_folder, i_output_folder,
                 i_mask_antialias, i_tile_size, i_tile_overlap, i_chunk_size, i_overlap, i_original_input_blend_strength,
-                i_model_variant, i_inference_steps
+                i_model_variant, i_inference_steps, i_decode_window, i_decode_temporal_overlap, i_torch_compile, i_torch_compile_mode
             ]
-
             i_btn.click(
                 fn=start_inpainting_flow,
                 inputs=_i_inputs,
@@ -1582,14 +1540,12 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 outputs=[i_file_prog, i_temp_prog, i_spat_prog, i_prog_text, i_output],
                 show_progress="hidden"
             )
-
             i_skip_btn.click(
                 fn=run_inpainting_batch,
                 inputs=[gr.State(False)] + _i_inputs + [gr.State("skip")],
                 outputs=[i_file_prog, i_temp_prog, i_spat_prog, i_prog_text, i_output],
                 show_progress="hidden"
             ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [i_conflict_group, i_btn])
-
             i_overwrite_btn.click(
                 fn=run_inpainting_batch,
                 inputs=[gr.State(False)] + _i_inputs + [gr.State("overwrite")],
@@ -1598,7 +1554,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [i_conflict_group, i_btn])
             
             i_cancel_btn.click(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [i_conflict_group, i_btn])
-
         with gr.Tab("Section 3: Merging GUI"):
             gr.Markdown("Finalize videos, merge mask outputs and encode in various SBS 3D formats.")
             
@@ -1633,6 +1588,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     with gr.Row():
                         m_use_gpu = gr.Checkbox(label="Use GPU", value=True)
                         m_color_transfer = gr.Checkbox(label="Color Transfer", value=True)
+                        m_poisson_blend = gr.Checkbox(label="Poisson Blending (Fixes Halos)", value=False)
                         m_undo_reverse = gr.Checkbox(label="Undo Reverse (for Blending)", value=False)
                         
                     with gr.Row():
@@ -1692,7 +1648,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     m_save_settings_btn = gr.Button("💾 Save Settings for This Video")
                     m_load_settings_btn = gr.Button("📂 Load Settings for This Video")
                     m_settings_status = gr.Textbox(label="Settings Status", interactive=False)
-
             gr.Markdown("---")
             with gr.Row():
                 m_file_prog = gr.HTML(value=make_progress_html(0, "Overall File Progress (%)"))
@@ -1736,7 +1691,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             # Update preview
             def do_preview(video_list, selected_video, frame_idx, preview_source,
                            inpainted_folder, original_folder, mask_folder,
-                           use_gpu, color_transfer,
+                           use_gpu, color_transfer, poisson_blend,
                            mask_thresh, mask_close, mask_dilate, mask_blur, mask_smoothstep, laplacian_blend_levels,
                            shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence, convergence_mode,
                            undo_reverse):
@@ -1759,6 +1714,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     "use_gpu": use_gpu,
                     "add_borders": False,
                     "enable_color_transfer": color_transfer,
+                    "poisson_blend": poisson_blend,
                     "mask_binarize_threshold": float(mask_thresh if mask_thresh is not None else -1.0),
                     "mask_close_kernel_size": int(mask_close or 0),
                     "mask_dilate_kernel_size": int(mask_dilate or 0),
@@ -1789,7 +1745,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 inputs=[
                     m_video_list_state, m_video_dropdown, m_frame_slider, m_preview_source,
                     m_inpainted_folder, m_original_folder, m_mask_folder,
-                    m_use_gpu, m_color_transfer,
+                    m_use_gpu, m_color_transfer, m_poisson_blend,
                     m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
                     m_convergence, m_convergence_mode, m_undo_reverse
@@ -1805,7 +1761,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             def save_video_settings(video_list, selected_video,
                                     mask_thresh, mask_close, mask_dilate, mask_blur, mask_smoothstep, laplacian_blend_levels,
                                     shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma,
-                                    convergence, convergence_mode, output_format, use_gpu, color_transfer, undo_reverse):
+                                    convergence, convergence_mode, output_format, use_gpu, color_transfer, poisson_blend, undo_reverse):
                 if not video_list or not selected_video:
                     return "No video selected."
                 
@@ -1835,6 +1791,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     "output_format": output_format,
                     "use_gpu": use_gpu,
                     "enable_color_transfer": color_transfer,
+                    "poisson_blend": poisson_blend,
                     "add_borders": False,
                 }
                 
@@ -1842,14 +1799,13 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 with open(sidecar_path, "w") as f:
                     json.dump(settings_to_save, f, indent=2)
                 return f"✅ Saved settings to {os.path.basename(sidecar_path)}"
-
             m_save_settings_btn.click(
                 fn=save_video_settings,
                 inputs=[
                     m_video_list_state, m_video_dropdown,
                     m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                    m_convergence, m_convergence_mode, m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse
+                    m_convergence, m_convergence_mode, m_output_format, m_use_gpu, m_color_transfer, m_poisson_blend, m_undo_reverse
                 ],
                 outputs=[m_settings_status]
             )
@@ -1857,7 +1813,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             # Load per-video settings
             def load_video_settings(video_list, selected_video):
                 if not video_list or not selected_video:
-                    return [gr.update()]*17 + ["No video selected."]
+                    return [gr.update()]*18 + ["No video selected."]
                 
                 video_info = None
                 for v in video_list:
@@ -1865,12 +1821,12 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                         video_info = v
                         break
                 if not video_info:
-                    return [gr.update()]*17 + ["Video not found."]
+                    return [gr.update()]*18 + ["Video not found."]
                 
                 sidecar_path = os.path.splitext(video_info["inpainted"])[0] + ".mergesettings.json"
                 if not os.path.exists(sidecar_path):
                     # No sidecar: don't revert to hardcoded defaults, just keep current GUI state
-                    return [gr.update()]*17 + [f"No saved settings found for {selected_video}"]
+                    return [gr.update()]*18 + [f"No saved settings found for {selected_video}"]
                 
                 try:
                     with open(sidecar_path, "r") as f:
@@ -1892,22 +1848,22 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                         s.get("output_format", gr.update()),
                         s.get("use_gpu", gr.update()),
                         s.get("enable_color_transfer", gr.update()),
+                        s.get("poisson_blend", gr.update()),
                         s.get("undo_reverse", gr.update()),
                         f"✅ Loaded settings from {os.path.basename(sidecar_path)}"
                     ]
                 except Exception as e:
-                    return [gr.update()]*17 + [f"Error loading settings: {e}"]
-
+                    return [gr.update()]*18 + [f"Error loading settings: {e}"]
             # Auto-preview on video selection change
             def on_video_change(video_list, selected_video, preview_source,
                                 inpainted_folder, original_folder, mask_folder,
-                                use_gpu, color_transfer,
+                                use_gpu, color_transfer, poisson_blend,
                                 mask_thresh, mask_close, mask_dilate, mask_blur, mask_smoothstep, laplacian_blend_levels,
                                 shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence, convergence_mode,
                                 undo_reverse):
                 return do_preview(video_list, selected_video, 0, preview_source,
                                   inpainted_folder, original_folder, mask_folder,
-                                  use_gpu, color_transfer,
+                                  use_gpu, color_transfer, poisson_blend,
                                   mask_thresh, mask_close, mask_dilate, mask_blur, mask_smoothstep, laplacian_blend_levels,
                                   shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence, convergence_mode,
                                   undo_reverse)
@@ -1917,7 +1873,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 inputs=[
                     m_video_list_state, m_video_dropdown, m_preview_source,
                     m_inpainted_folder, m_original_folder, m_mask_folder,
-                    m_use_gpu, m_color_transfer,
+                    m_use_gpu, m_color_transfer, m_poisson_blend,
                     m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
                     m_convergence, m_convergence_mode, m_undo_reverse
@@ -1929,7 +1885,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 outputs=[
                     m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                    m_convergence, m_convergence_mode, m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse,
+                    m_convergence, m_convergence_mode, m_output_format, m_use_gpu, m_color_transfer, m_poisson_blend, m_undo_reverse,
                     m_settings_status
                 ]
             )
@@ -1938,7 +1894,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             _auto_preview_inputs = [
                 m_video_list_state, m_video_dropdown, m_frame_slider, m_preview_source,
                 m_inpainted_folder, m_original_folder, m_mask_folder,
-                m_use_gpu, m_color_transfer,
+                m_use_gpu, m_color_transfer, m_poisson_blend,
                 m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
                 m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
                 m_convergence, m_convergence_mode, m_undo_reverse
@@ -1947,7 +1903,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             
             for _ctrl in [m_preview_source, m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
                           m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                          m_use_gpu, m_color_transfer, m_convergence, m_convergence_mode, m_frame_slider, m_undo_reverse]:
+                          m_use_gpu, m_color_transfer, m_poisson_blend, m_convergence, m_convergence_mode, m_frame_slider, m_undo_reverse]:
                 _ctrl.change(
                     fn=do_preview,
                     inputs=_auto_preview_inputs,
@@ -1960,7 +1916,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 outputs=[
                     m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
-                    m_convergence, m_convergence_mode, m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse,
+                    m_convergence, m_convergence_mode, m_output_format, m_use_gpu, m_color_transfer, m_poisson_blend, m_undo_reverse,
                     m_settings_status
                 ]
             )
@@ -1968,7 +1924,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             # Batch merging
             def start_merging_flow(
                 inpainted_f, original_f, mask_f, output_f,
-                use_gpu, output_format, batch_chunk_size, color_transfer,
+                use_gpu, output_format, batch_chunk_size, color_transfer, poisson_blend,
                 codec, crf,
                 mask_bin, mask_close, mask_dilate, mask_blur, mask_smoothstep, laplacian_blend_levels,
                 shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma,
@@ -1996,7 +1952,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     "Right-Eye Only": "_merged_right_eye.mp4"
                 }
                 target_sfx = suffix_map.get(output_format, "_merged_*.mp4")
-
                 for vid in inpainted_videos:
                     # Identical logic to run_merging.py for core name extraction
                     vid_base = os.path.basename(vid)
@@ -2029,22 +1984,19 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     m_btn: gr.update(interactive=False),
                     m_has_conflicts: False
                 }
-
             # Define processing trigger
             _m_inputs = [
                 m_inpainted_folder, m_original_folder, m_mask_folder, m_output_folder,
-                m_use_gpu, m_output_format, m_batch_chunk_size, m_color_transfer,
+                m_use_gpu, m_output_format, m_batch_chunk_size, m_color_transfer, m_poisson_blend,
                 m_codec, m_output_crf,
                 m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
                 m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
                 m_convergence, m_convergence_mode, m_undo_reverse
             ]
             _m_outputs = [m_file_prog, m_sub_prog, m_prog_text, m_output]
-
             def process_merging_ui(*args, **kwargs):
                 for f_perc, s_perc, text, stat in process_merging(*args, **kwargs):
                     yield make_progress_html(f_perc, "Overall File Progress (%)"), make_progress_html(s_perc, "Video Rendering Progress (%)"), text, stat
-
             m_btn.click(
                 fn=start_merging_flow,
                 inputs=_m_inputs,
@@ -2055,14 +2007,12 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 outputs=_m_outputs,
                 show_progress="hidden"
             )
-
             m_skip_btn.click(
                 fn=process_merging_ui,
                 inputs=[gr.State(False)] + _m_inputs + [gr.State("skip")],
                 outputs=_m_outputs,
                 show_progress="hidden"
             ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [m_conflict_group, m_btn])
-
             m_overwrite_btn.click(
                 fn=process_merging_ui,
                 inputs=[gr.State(False)] + _m_inputs + [gr.State("overwrite")],
@@ -2071,7 +2021,6 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             ).then(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [m_conflict_group, m_btn])
             
             m_cancel_btn.click(lambda: (gr.update(visible=False), gr.update(interactive=True)), None, [m_conflict_group, m_btn])
-
     _gui_persist_inputs = [
         w_input_folder, w_depth_folder, w_disparity, w_lefteye_folder, w_hires_folder, w_lowres_folder,
         w_high_batch, w_high_res, w_enable_low, w_reverse_out, w_low_batch, w_low_res, w_use_cuda, w_micro_hole_strength,
@@ -2080,14 +2029,15 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
         w_preview_source, w_frame_slider,
         i_lefteye_folder, i_grid_folder, i_output_folder,
         i_model_variant, i_mask_antialias, i_tile_size, i_tile_overlap, i_chunk_size, i_overlap, i_original_input_blend_strength,
+        i_inference_steps, i_decode_window, i_decode_temporal_overlap,
+        i_torch_compile, i_torch_compile_mode,
         m_inpainted_folder, m_original_folder, m_mask_folder, m_output_folder,
-        m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse, m_batch_chunk_size, m_convergence, m_convergence_mode,
+        m_output_format, m_use_gpu, m_color_transfer, m_poisson_blend, m_undo_reverse, m_batch_chunk_size, m_convergence, m_convergence_mode,
         m_codec, m_output_crf,
         m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
         m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
         m_preview_source, m_frame_slider,
     ]
-
     def apply_gui_settings_on_load():
         cfg = load_gui_settings_merged()
         w, i, m = cfg["warping"], cfg["inpainting"], cfg["merging"]
@@ -2099,22 +2049,21 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             w["preview_source"], w["frame_slider"],
             i["lefteye_folder"], i["grid_folder"], i["output_folder"],
             i["model_variant"], i["mask_antialias"], i["tile_size"], i["tile_overlap"], i["chunk_size"], i["overlap"], i["original_input_blend_strength"],
+            i.get("inference_steps", 1), i.get("decode_window", 2), i.get("decode_temporal_overlap", 1),
+            i.get("torch_compile", False), i.get("torch_compile_mode", "reduce-overhead"),
             m["inpainted_folder"], m["original_folder"], m["mask_folder"], m["output_folder"],
-            m["output_format"], m["use_gpu"], m["color_transfer"], m["undo_reverse"], m["batch_chunk_size"], m["convergence"], m["convergence_mode"],
+            m["output_format"], m["use_gpu"], m["color_transfer"], m.get("poisson_blend", False), m["undo_reverse"], m["batch_chunk_size"], m["convergence"], m["convergence_mode"],
             m["codec"], m["output_crf"],
             m.get("mask_bin_thresh", 0.0), m.get("mask_close", 5), m.get("mask_dilate", 13), m.get("mask_blur", 3), m.get("mask_smoothstep", 0.0), m.get("laplacian_blend_levels", 0),
             m["shadow_shift"], m["shadow_start_op"], m["shadow_decay"], m["shadow_min_op"], m["shadow_gamma"],
             m["preview_source"], m["frame_slider"],
         )
-
     demo.load(apply_gui_settings_on_load, inputs=None, outputs=_gui_persist_inputs)
-
     for _gui_comp in _gui_persist_inputs:
         _gui_comp.change(
             fn=persist_gui_settings_bundle,
             inputs=_gui_persist_inputs,
             outputs=None,
         )
-
 if __name__ == "__main__":
     demo.queue().launch(inbrowser=True)
