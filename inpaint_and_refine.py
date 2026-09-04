@@ -32,8 +32,52 @@ try:
         FP8_CONFIG = None
         
     HAS_TORCHAO = True
-except ImportError:
+    TORCHAO_IMPORT_ERROR = None
+
+    def _patch_int8_weight_only_fp16_overflow():
+        """Make torchao's INT8 weight-only matmul safe in fp16.
+
+        The stock kernel computes `x @ w_int8` in the activation dtype and only
+        then applies the per-channel scale. That unscaled product is up to 127x
+        the real output, so with this model's larger activations it exceeds the
+        fp16 range (65504) and becomes inf. The next GroupNorm turns the inf
+        into NaN, which spreads through the UNet and decodes to a black video.
+
+        Folding a power-of-two down-scale into the int8 weights removes the
+        headroom problem: 1/128 and 128 are exact in fp16, the product is 128x
+        smaller, and the accuracy and speed are unchanged.
+        """
+        from torchao.dtypes.affine_quantized_tensor_ops import (
+            register_aqt_quantized_linear_dispatch,
+        )
+        from torchao.dtypes.uintx.plain_layout import _linear_fp_act_int8_weight_check
+
+        def _impl(input_tensor, weight_tensor, bias):
+            w_vals_int8_t = weight_tensor.tensor_impl.int_data.t()
+            scale = weight_tensor.tensor_impl.scale
+            x = input_tensor.reshape(-1, input_tensor.shape[-1])
+            if x.dtype == torch.float16:
+                m = torch.mm(x, w_vals_int8_t.to(x.dtype) * (1.0 / 128.0))
+                y = m * (scale.to(m.dtype) * 128.0)
+            else:
+                m = torch.mm(x, w_vals_int8_t.to(x.dtype))
+                y = m * scale.to(m.dtype)
+            y = y.reshape(*input_tensor.shape[:-1], y.shape[-1])
+            if bias is not None:
+                y += bias.to(y.dtype)
+            return y
+
+        register_aqt_quantized_linear_dispatch(_linear_fp_act_int8_weight_check, _impl)
+
+    try:
+        _patch_int8_weight_only_fp16_overflow()
+    except Exception as _e:
+        print(f"[INT8] Warning: could not patch torchao int8 matmul for fp16 safety: {_e}")
+except ImportError as e:
+    # A torchao built for a newer torch also lands here (e.g. torchao 0.18 with
+    # torch 2.9 fails on "cannot import name 'ScalingType'"), so keep the reason.
     HAS_TORCHAO = False
+    TORCHAO_IMPORT_ERROR = e
     INT8_CONFIG = None
     FP8_CONFIG = None
 
@@ -157,7 +201,16 @@ def load_model(model_config_path, ckpt_path, steps=None, use_int8=False, use_fp8
         return filter_attention
         
     is_full_attention = "no_full_atten" not in ckpt_path
-    
+
+    if (is_pre_quantized_int8 or is_pre_quantized_fp8) and not HAS_TORCHAO:
+        raise RuntimeError(
+            f"Checkpoint '{os.path.basename(ckpt_path)}' is pre-quantized, but torchao could not be "
+            f"imported ({TORCHAO_IMPORT_ERROR}).\n"
+            "Install a torchao build that matches this torch version "
+            "(torchao==0.15.0 for torch 2.9.x):\n"
+            "  python_embed\\python.exe -m pip install torchao==0.15.0"
+        )
+
     if HAS_TORCHAO:
         filter_fn = get_filter(is_full_attention)
         if is_pre_quantized_int8:
@@ -226,9 +279,20 @@ def load_model(model_config_path, ckpt_path, steps=None, use_int8=False, use_fp8
 
 def move_module_device(module, device):
     """Move an nn.Module (including torchao quantized tensors and torch.compile modules)
-    in-place to target device without triggering PyTorch's _apply() parameter swapping,
-    which fails on compiled modules due to Dynamo weakrefs.
+    in-place to target device.
+
+    nn.Module.to() rebuilds torchao's quantized tensor subclasses on the target
+    device correctly, so it is the default path. Walking into the subclasses by
+    hand moves only their inner tensors and leaves the wrapper's own device
+    metadata stale, which makes Float8Tensor (the FP8 checkpoints) raise
+    "Attempted to set the storage of a tensor on device ..." on its first
+    transpose. The manual walk is kept for compiled modules, where _apply()'s
+    parameter swapping breaks Dynamo's weakrefs.
     """
+    if not any(hasattr(m, '_orig_mod') for m in module.modules()):
+        module.to(device)
+        return
+
     def move_t(t, d):
         if hasattr(t, '__tensor_flatten__'):
             attrs, _ = t.__tensor_flatten__()
@@ -515,7 +579,11 @@ def process_clip(denoising_model, job):
                     "motion_bucket_id": torch.tensor([127]).cuda()
                 }
 
-                with torch.inference_mode():
+                # no_grad rather than inference_mode: torchao's quantized tensor
+                # subclasses (the FP8 checkpoints in particular) alias their inner
+                # tensors on ops like .t(), which raises "Cannot set version_counter
+                # for inference tensor" on inference tensors.
+                with torch.no_grad():
                     with torch.autocast("cuda", dtype=torch.float16):
                         # Extract conditioning logic natively
                         batch = denoising_model.add_custom_cond(input_batch, infer=True)
@@ -570,7 +638,7 @@ def process_clip(denoising_model, job):
                 def denoiser(input, sigma, c):
                     return denoising_model.denoiser(denoising_model.model, input, sigma, c, **additional_model_inputs)
 
-                with torch.inference_mode():
+                with torch.no_grad():
                     with denoising_model.ema_scope("Plotting"):
                         with torch.autocast(device_type='cuda', dtype=torch.float16):
                             shape = (x.shape[0], 4, int(x.shape[2] // 8), int(x.shape[3] // 8))
@@ -649,7 +717,7 @@ def process_clip(denoising_model, job):
             # Explicitly cast to half so no FP32 promotion happens
             latent_win_flat = einops.rearrange(latent_win, 'b c t h w -> (b t) c h w').half()
             
-            with torch.inference_mode():
+            with torch.no_grad():
                 decoded_flat = denoising_model.decode_first_stage(latent_win_flat, num_video_frames=win_len)
             decoded_win = einops.rearrange(decoded_flat, '(b t) c h w -> b c t h w', b=1, t=win_len).cpu().half()
             del latent_win, latent_win_flat, decoded_flat
